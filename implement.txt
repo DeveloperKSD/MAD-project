@@ -1,0 +1,1829 @@
+# Bluetooth-Only Mesh Chat Implementation Guide
+
+This document describes how to build a smaller Android Bluetooth-only mesh chat
+system end to end. It is written as a practical implementation plan for a new
+repository.
+
+The target product is:
+
+- local user creation
+- persistent cryptographic identity
+- nearby peer discovery over Bluetooth LE
+- peer identification independent of Bluetooth MAC addresses
+- long-running scan, advertise, connect, disconnect, and reconnect behavior
+- encrypted direct messages
+- optional multi-hop mesh forwarding
+- local message persistence
+- predictable recovery after app restart, Bluetooth restart, and peer movement
+
+The recommended build strategy is to ship direct BLE chat first, then add mesh
+forwarding. Direct chat exercises the hard Android Bluetooth lifecycle and
+identity problems without adding routing complexity too early.
+
+## Core Principles
+
+1. Application identity must be independent of Bluetooth identity.
+2. Bluetooth discovery is only a hint, not authentication.
+3. A connection is temporary; a peer relationship is long-lived.
+4. Long-term connection means automatic reconnection, not one permanent socket.
+5. Every packet needs an ID, type, sender, recipient, timestamp, TTL, and payload.
+6. Every received packet must be deduplicated before processing or forwarding.
+7. Private messages should require an authenticated encrypted session.
+8. BLE writes only prove local stack acceptance, not final delivery.
+9. Delivery must be represented by explicit acknowledgements.
+10. The app must survive process death by rebuilding state from persisted identity
+    and message storage.
+
+## Recommended Minimal Architecture
+
+Use these modules or packages:
+
+```text
+identity/
+  IdentityManager
+  LocalIdentity
+  PeerIdentity
+
+crypto/
+  CryptoSessionManager
+  SessionState
+  PacketSigner
+
+bluetooth/
+  BluetoothPermissionManager
+  BleAdvertiser
+  BleScanner
+  BleGattServer
+  BleGattClient
+  BleConnectionManager
+  BlePacketWriter
+
+mesh/
+  PeerManager
+  PacketCodec
+  PacketProcessor
+  MessageRouter
+  RelayManager
+  FragmentManager
+  AckManager
+
+storage/
+  MessageStore
+  PeerStore
+  SettingsStore
+
+service/
+  MeshForegroundService
+  MeshController
+
+ui/
+  OnboardingViewModel
+  PeopleViewModel
+  ChatViewModel
+```
+
+The dependency direction should be:
+
+```text
+UI -> ViewModel -> MeshController
+MeshController -> IdentityManager
+MeshController -> BleConnectionManager
+MeshController -> PacketProcessor
+PacketProcessor -> MessageRouter
+MessageRouter -> PeerManager / CryptoSessionManager / MessageStore
+BleConnectionManager -> BleGattClient / BleGattServer / BleAdvertiser / BleScanner
+```
+
+Do not let Bluetooth code directly update UI state. Bluetooth code should emit
+events; higher layers decide what those events mean.
+
+## Data Model
+
+### LocalIdentity
+
+The local identity is created once and persisted.
+
+```kotlin
+data class LocalIdentity(
+    val peerId: String,
+    val displayName: String,
+    val noisePublicKey: ByteArray,
+    val noisePrivateKey: ByteArray,
+    val signingPublicKey: ByteArray,
+    val signingPrivateKey: ByteArray,
+    val createdAtMs: Long
+)
+```
+
+Use separate keys for:
+
+- session encryption key agreement, for example X25519 static keypair
+- packet/announcement signing, for example Ed25519 keypair
+
+Derive `peerId` from the public encryption key:
+
+```text
+peerId = first 8 bytes of SHA-256(noisePublicKey), encoded as 16 lowercase hex chars
+```
+
+This gives a compact ID for packets while keeping the full public key available
+for verification.
+
+### PeerIdentity
+
+```kotlin
+data class PeerIdentity(
+    val peerId: String,
+    val displayName: String,
+    val noisePublicKey: ByteArray,
+    val signingPublicKey: ByteArray,
+    val firstSeenMs: Long,
+    val lastSeenMs: Long,
+    val verified: Boolean
+)
+```
+
+`verified = true` should mean the peer completed an authenticated handshake
+proving possession of the private key matching `noisePublicKey`.
+
+An announcement alone is not enough to mark a peer as verified.
+
+### PeerState
+
+```kotlin
+enum class PeerConnectionState {
+    Discovered,
+    Connecting,
+    Connected,
+    Handshaking,
+    Authenticated,
+    Disconnected,
+    Failed
+}
+
+data class PeerState(
+    val identity: PeerIdentity,
+    val state: PeerConnectionState,
+    val directDeviceAddress: String?,
+    val directLinkId: String?,
+    val rssi: Int?,
+    val lastSeenMs: Long,
+    val lastConnectedMs: Long?,
+    val lastDisconnectedMs: Long?,
+    val failureReason: String?
+)
+```
+
+The Bluetooth address is only a current transport locator. It must not become
+the peer identity. Android may rotate BLE addresses.
+
+## Persistent Identity
+
+### Storage Requirements
+
+The app must store the local identity securely.
+
+Recommended Android storage:
+
+- `EncryptedSharedPreferences` for small key material
+- or Android Keystore wrapping an app-owned encrypted blob
+
+Do not store private keys in plain `SharedPreferences`.
+
+### IdentityManager Responsibilities
+
+`IdentityManager` owns:
+
+- first-run identity creation
+- loading existing identity
+- display-name updates
+- key validation
+- identity rotation
+- emergency identity wipe
+
+Example interface:
+
+```kotlin
+interface IdentityManager {
+    suspend fun loadOrCreate(displayNameProvider: suspend () -> String): LocalIdentity
+    suspend fun getLocalIdentity(): LocalIdentity
+    suspend fun updateDisplayName(name: String)
+    suspend fun rotateIdentity(newDisplayName: String)
+    suspend fun clearIdentity()
+}
+```
+
+### Startup Flow
+
+```text
+App starts
+-> IdentityManager.loadOrCreate()
+   -> encrypted storage has keys?
+      -> yes: load and validate key sizes
+      -> no: generate X25519 + Ed25519 keypairs
+   -> derive peerId from X25519 public key
+   -> load display name or ask user
+-> MeshController starts with LocalIdentity
+```
+
+### Identity Rotation
+
+Identity rotation means:
+
+```text
+stop Bluetooth services
+delete persisted private keys
+generate new keypairs
+derive new peerId
+clear active sessions
+clear or archive old peer trust state
+restart Bluetooth services
+broadcast new announcement
+```
+
+Do not silently rotate identity because of a recoverable load error. If the key
+store fails temporarily, retry and surface an error.
+
+## Bluetooth Permissions
+
+Handle Android permission differences by API level.
+
+For Android 12 and newer:
+
+```xml
+<uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+```
+
+For older Android versions, BLE scanning may require location permission:
+
+```xml
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+```
+
+You also need Bluetooth feature declarations:
+
+```xml
+<uses-feature
+    android:name="android.hardware.bluetooth_le"
+    android:required="true" />
+```
+
+For long-running communication, use a foreground service:
+
+```xml
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+```
+
+Declare the service:
+
+```xml
+<service
+    android:name=".service.MeshForegroundService"
+    android:exported="false"
+    android:foregroundServiceType="connectedDevice" />
+```
+
+The app must check:
+
+- permissions granted
+- Bluetooth adapter available
+- Bluetooth enabled
+- BLE advertiser available
+- BLE scanner available
+- GATT server support available
+
+Expose these as a state object:
+
+```kotlin
+data class BluetoothReadiness(
+    val hasBle: Boolean,
+    val hasPermissions: Boolean,
+    val bluetoothEnabled: Boolean,
+    val canAdvertise: Boolean,
+    val canScan: Boolean,
+    val canGattServer: Boolean
+)
+```
+
+## BLE Transport Design
+
+The simplest reliable BLE design is:
+
+- every device advertises as a BLE peripheral
+- every device scans as a BLE central
+- when device A scans device B, A connects to B's GATT server
+- both devices may also accept inbound GATT connections
+- packets are written through a single characteristic
+- packets are received through writes and notifications
+
+This symmetric central/peripheral design gives better connectivity because any
+device can discover and connect to any other nearby device.
+
+### GATT UUIDs
+
+Generate fixed UUIDs for your app. Use the same values on every client build.
+
+```kotlin
+object BleUuids {
+    val SERVICE_UUID: UUID =
+        UUID.fromString("00000000-1111-2222-3333-444444444444")
+
+    val PACKET_CHARACTERISTIC_UUID: UUID =
+        UUID.fromString("00000000-1111-2222-3333-555555555555")
+
+    val CLIENT_CONFIG_UUID: UUID =
+        UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+}
+```
+
+Use your own random service and characteristic UUIDs in production.
+
+### Advertising Payload
+
+BLE advertising payloads are tiny. Do not put full identity data in the
+advertisement.
+
+Recommended advertisement:
+
+```text
+service UUID
+service data:
+  protocolVersion: 1 byte
+  shortPeerHint: 4 bytes
+  flags: 1 byte
+```
+
+`shortPeerHint` can be the first 4 bytes of `peerId`. It helps deduplicate scan
+results but must not be treated as authentication.
+
+Avoid advertising:
+
+- display name
+- full peer ID
+- public keys
+- device model
+- account data
+- message contents
+
+### Scan Filtering
+
+Scan only for your app service UUID:
+
+```kotlin
+val filter = ScanFilter.Builder()
+    .setServiceUuid(ParcelUuid(BleUuids.SERVICE_UUID))
+    .build()
+```
+
+Use scan settings based on app state:
+
+- foreground chat screen: low latency
+- foreground idle: balanced
+- background: duty-cycled scanning
+- battery saver: sparse scanning
+
+Never restart scanning in a tight loop. Android will throttle or fail scans if
+you start too frequently.
+
+### GATT Server
+
+The GATT server exposes one characteristic:
+
+```text
+properties:
+  READ
+  WRITE
+  WRITE_NO_RESPONSE
+  NOTIFY
+
+permissions:
+  READ
+  WRITE
+```
+
+Inbound peer writes are packets from connected centrals.
+
+Notifications are used to send packets from the peripheral/server side to
+subscribed centrals.
+
+### GATT Client
+
+The GATT client flow:
+
+```text
+scan result found
+-> check service UUID
+-> check not self
+-> check connection limit
+-> check not already connected/pending
+-> connectGatt()
+-> discoverServices()
+-> find packet characteristic
+-> request MTU
+-> enable notifications
+-> mark link ready
+-> send direct ANNOUNCE
+```
+
+Always set a timeout for:
+
+- connection attempt
+- service discovery
+- MTU negotiation
+- notification subscription
+- write completion
+
+If a timeout fires, close the GATT and clear pending state.
+
+## Connection Tracking
+
+Use a dedicated connection tracker.
+
+```kotlin
+data class BleLink(
+    val linkId: String,
+    val deviceAddress: String,
+    val peerId: String?,
+    val role: BleRole,
+    val state: BleLinkState,
+    val gatt: BluetoothGatt?,
+    val device: BluetoothDevice,
+    val characteristic: BluetoothGattCharacteristic?,
+    val mtu: Int,
+    val createdAtMs: Long,
+    val lastActivityMs: Long
+)
+
+enum class BleRole {
+    Client,
+    Server
+}
+
+enum class BleLinkState {
+    Pending,
+    Connected,
+    ServicesReady,
+    NotificationsReady,
+    Identified,
+    Closed
+}
+```
+
+Keep separate maps:
+
+```kotlin
+deviceAddress -> BleLink
+peerId -> set of deviceAddress
+linkId -> BleLink
+```
+
+Why both device and peer maps are needed:
+
+- before ANNOUNCE, you only know device address
+- after ANNOUNCE, you know peer ID
+- the same peer may appear under a different address later
+- stale device addresses must not pin a peer forever
+
+### Connection Limits
+
+BLE stacks are fragile. Limit active links.
+
+Good starting values:
+
+```text
+max total links: 6
+max outgoing client links: 4
+max incoming server links: 4
+max pending connects: 3
+min reconnect delay per address: 30 seconds
+stale link timeout: 2 minutes without activity
+```
+
+Eviction policy:
+
+1. closed or failed links
+2. unidentified links older than timeout
+3. lowest RSSI non-favorite peer
+4. oldest inactive peer
+
+## Packet Format
+
+Use a binary packet format. Avoid JSON for BLE packets; it is verbose and causes
+more fragmentation.
+
+Recommended packet:
+
+```text
+version:      UInt8
+type:         UInt8
+ttl:          UInt8
+flags:        UInt8
+timestampMs:  UInt64 big-endian
+packetId:     16 bytes
+senderId:     8 bytes
+recipientId:  8 bytes optional if flags has recipient
+payloadLen:   UInt32 big-endian
+payload:      bytes
+signature:    64 bytes optional if flags has signature
+```
+
+Recommended flags:
+
+```text
+0x01 hasRecipient
+0x02 hasSignature
+0x04 isFragment
+0x08 isAckRequested
+0x10 isCompressed
+```
+
+Message types:
+
+```kotlin
+enum class PacketType(val value: UByte) {
+    ANNOUNCE(0x01u),
+    MESSAGE(0x02u),
+    LEAVE(0x03u),
+    HANDSHAKE(0x10u),
+    ENCRYPTED(0x11u),
+    ACK(0x12u),
+    FRAGMENT(0x20u),
+    PING(0x30u),
+    PONG(0x31u)
+}
+```
+
+Special broadcast recipient:
+
+```text
+FF FF FF FF FF FF FF FF
+```
+
+### Packet ID
+
+Every packet needs a stable unique ID.
+
+Option A:
+
+```text
+packetId = random 16 bytes
+```
+
+Option B:
+
+```text
+packetId = first 16 bytes of SHA-256(senderId || timestampMs || type || payload)
+```
+
+Use random IDs unless you need deterministic sync. Random IDs are simpler.
+
+### Signature
+
+Sign the packet fields that should not change during relay.
+
+Do not sign TTL if relays decrement TTL.
+
+Suggested signature preimage:
+
+```text
+version
+type
+flags without hasSignature
+timestampMs
+packetId
+senderId
+recipientId if present
+payloadLen
+payload
+```
+
+Use Ed25519:
+
+```text
+signature = Ed25519.sign(signingPrivateKey, preimage)
+```
+
+Verify with the sender's advertised signing public key.
+
+## Announcement Packet
+
+The announcement tells nearby peers who you claim to be.
+
+Payload format:
+
+```text
+TLV list:
+  0x01 displayName UTF-8
+  0x02 noisePublicKey 32 bytes
+  0x03 signingPublicKey 32 bytes
+  0x04 capabilities bitfield optional
+```
+
+TLV encoding:
+
+```text
+type: UInt8
+length: UInt8
+value: bytes
+```
+
+Announcement validation:
+
+```text
+decode TLV
+require displayName present and valid UTF-8
+require noisePublicKey size == 32
+require signingPublicKey size == 32
+derive peerId from noisePublicKey
+require packet.senderId == derived peerId
+verify packet signature with signingPublicKey
+reject if timestamp too far in future or past
+store or update peer as unverified/discovered
+```
+
+After a successful encrypted handshake, mark the peer verified.
+
+### When to Send ANNOUNCE
+
+Send an announcement:
+
+- after GATT link becomes ready
+- after receiving a valid announcement from a new peer
+- periodically while service is active
+- after display name changes
+- after identity rotates
+- after Bluetooth restarts
+
+Good initial values:
+
+```text
+direct announce after link ready: immediate
+periodic announce interval foreground: 30 seconds
+periodic announce interval background: 2-5 minutes
+```
+
+Add jitter so all devices do not announce at the same time:
+
+```text
+actualDelay = baseDelay + random(0, baseDelay / 3)
+```
+
+## Crypto Session Design
+
+Use an established protocol instead of custom encryption.
+
+Recommended:
+
+- Noise Protocol `Noise_XX_25519_ChaChaPoly_SHA256`
+- or libsodium sealed boxes / XChaCha20-Poly1305 with a well-defined handshake
+
+Noise XX is a good fit because neither side needs to know the other's static
+public key before the handshake.
+
+### Session States
+
+```kotlin
+sealed class SessionState {
+    data object None : SessionState()
+    data object Handshaking : SessionState()
+    data class Established(
+        val peerId: String,
+        val remoteStaticPublicKey: ByteArray,
+        val handshakeHash: ByteArray,
+        val establishedAtMs: Long,
+        val sentCount: Long,
+        val receivedCount: Long
+    ) : SessionState()
+    data class Failed(val reason: String) : SessionState()
+}
+```
+
+### Handshake Flow
+
+```text
+A knows B peerId from ANNOUNCE
+A creates Noise initiator session for B
+A sends HANDSHAKE message 1 to B
+B creates responder session
+B processes message 1
+B sends HANDSHAKE message 2 to A
+A processes message 2
+A sends HANDSHAKE message 3 to B
+B processes message 3
+Both derive transport encryption keys
+Both know remote static public key
+Both derive peerId from remote static public key
+Both require derived peerId == claimed sender peerId
+Both mark session Established
+```
+
+The critical security check:
+
+```text
+derivedPeerId(remoteStaticPublicKey) must equal packet senderId
+```
+
+If it does not match:
+
+```text
+destroy candidate session
+drop packet
+do not update peer as verified
+```
+
+### Rekeying
+
+Rekey sessions periodically.
+
+Good starting limits:
+
+```text
+rekey after 1 hour
+rekey after 1000 sent messages
+rekey after app process restart
+```
+
+On process restart, it is fine to keep the persistent identity but discard live
+sessions. Re-establish Noise sessions when peers are seen again.
+
+## Message Encryption
+
+Plain public broadcast can use `MESSAGE`.
+
+Private direct messages should use `ENCRYPTED`.
+
+Inner plaintext:
+
+```text
+innerType: UInt8
+innerPayload: bytes
+```
+
+Inner types:
+
+```text
+0x01 private text message
+0x02 delivery ack
+0x03 read receipt
+0x04 peer state
+```
+
+Encrypted packet:
+
+```text
+outer type: ENCRYPTED
+outer senderId: sender peer ID
+outer recipientId: recipient peer ID
+outer payload: Noise encrypted bytes
+```
+
+Do not put private message metadata in the outer payload unless it is needed for
+routing.
+
+## Text Message Model
+
+```kotlin
+data class ChatMessage(
+    val messageId: String,
+    val senderId: String,
+    val recipientId: String?,
+    val body: String,
+    val createdAtMs: Long,
+    val isPrivate: Boolean,
+    val status: MessageStatus
+)
+
+enum class MessageStatus {
+    Pending,
+    SentToTransport,
+    Delivered,
+    Read,
+    Failed
+}
+```
+
+Message payload:
+
+```text
+messageId: UUID string or 16 bytes
+createdAtMs: UInt64
+encoding: UInt8, 1 = UTF-8
+bodyLen: UInt32
+body: UTF-8 bytes
+```
+
+Validate:
+
+- max body bytes
+- valid UTF-8
+- timestamp sanity
+- message ID format
+
+Good starting max:
+
+```text
+max text body: 4096 bytes
+```
+
+## Delivery ACKs
+
+A BLE write callback does not mean peer delivery. It means the local Bluetooth
+stack accepted the write or the remote GATT operation completed at the transport
+level.
+
+Use explicit app-level ACK packets.
+
+ACK payload:
+
+```text
+ackedPacketId: 16 bytes
+ackedMessageId: optional message ID
+status: UInt8
+timestampMs: UInt64
+```
+
+ACK statuses:
+
+```text
+0x01 received
+0x02 decrypted
+0x03 displayed
+0x04 rejected
+```
+
+For private messages, send ACK inside the encrypted session if possible.
+
+Retry policy:
+
+```text
+try send immediately
+if no ACK after 5 seconds, retry
+then retry after 15 seconds
+then retry after 45 seconds
+then mark pending until peer is seen again
+```
+
+Limit retries:
+
+```text
+max active retries while connected: 3
+max queued messages per peer: 100
+max queued age: 7 days
+```
+
+## Fragmentation
+
+BLE payload size depends on MTU and characteristic overhead. Do not assume large
+writes will work.
+
+Use an app fragmentation layer.
+
+Fragment payload:
+
+```text
+fragmentId: 16 bytes
+originalType: UInt8
+totalFragments: UInt16
+index: UInt16
+originalPacketId: 16 bytes
+chunkLen: UInt16
+chunk: bytes
+```
+
+Recommended limits:
+
+```text
+max fragment payload: 400 bytes
+max fragments per packet: 256
+max reassembly memory per peer: 1 MB
+fragment timeout: 60 seconds
+```
+
+Send a normal packet if encoded size fits one BLE write. Otherwise:
+
+```text
+encode original packet without BLE padding
+split into chunks
+send each chunk as FRAGMENT packet
+receiver reassembles
+receiver decodes original packet
+receiver processes original packet
+```
+
+Deduplicate fragments using:
+
+```text
+senderId + fragmentId + index
+```
+
+Drop reassembly if:
+
+- duplicate fragment conflicts with existing bytes
+- index is out of range
+- total fragment count changes
+- timeout expires
+- memory limit exceeded
+
+## Mesh Forwarding
+
+Build direct chat first. Add mesh forwarding after encrypted direct messages
+work reliably.
+
+Basic relay rule:
+
+```text
+if packet.senderId == myPeerId:
+    drop
+if packet.packetId already seen:
+    drop
+if packet.recipientId == myPeerId:
+    process
+else if packet.recipientId is broadcast:
+    process locally
+    relay if ttl > 0
+else:
+    relay if ttl > 0
+```
+
+Before relaying:
+
+```text
+ttl = ttl - 1
+keep original signature unchanged
+do not alter payload
+do not alter packetId
+send to connected peers except ingress link
+```
+
+Seen cache:
+
+```text
+key: packetId
+value: firstSeenMs
+capacity: 5000 packets
+ttl: 10 minutes
+```
+
+Relay constraints:
+
+```text
+max TTL: 5
+do not relay malformed packets
+do not relay packets with invalid signatures if the sender key is known
+do not relay packets from yourself
+do not relay expired packets
+```
+
+For private encrypted packets, relays should not decrypt. They only use the
+outer sender, recipient, packet ID, and TTL.
+
+## Source Routing Optional
+
+Start without source routing. Broadcast-style relay is simpler and works for
+small nearby meshes.
+
+If you add source routing later:
+
+```text
+route: list of peer IDs representing next hops
+current relay sends only to next hop
+packet falls back to broadcast if next hop not connected
+```
+
+You need topology discovery before source routing is useful.
+
+## Peer Manager
+
+Responsibilities:
+
+- add/update peer from announcement
+- update peer after successful handshake
+- mark direct link connected/disconnected
+- maintain last seen
+- expose active peer list
+- expire stale peers
+- map display names to peer IDs
+
+Do not remove a peer immediately on BLE disconnect. BLE disconnects are common.
+
+Recommended lifecycle:
+
+```text
+on valid ANNOUNCE:
+    peer state = Discovered or Connected
+    lastSeen = now
+
+on link ready:
+    direct connection = true
+
+on handshake established:
+    verified = true
+    state = Authenticated
+
+on link disconnected:
+    direct connection = false
+    state = Disconnected
+    keep peer visible for grace period
+
+on no activity for stale timeout:
+    remove from active list
+    keep identity in peer store if trusted
+```
+
+Good defaults:
+
+```text
+disconnect grace: 30 seconds
+stale peer timeout: 5 minutes
+trusted peer retention: until user clears data
+```
+
+## Packet Processor
+
+Centralize packet handling in one component.
+
+Input:
+
+```text
+RoutedPacket(packet, ingressLinkId, transportPeerHint)
+```
+
+Processing order:
+
+```text
+1. Decode binary packet.
+2. Reject malformed fields.
+3. Reject packet from self.
+4. Check timestamp window.
+5. Check packet ID dedup cache.
+6. Validate sender ID length.
+7. Validate recipient ID if present.
+8. Verify signature when possible.
+9. Dispatch by packet type.
+10. Update peer last seen only after valid processing.
+11. Relay if appropriate.
+```
+
+Use per-peer serialization for packets that touch session state. This prevents
+two handshake messages from racing.
+
+Example:
+
+```kotlin
+class PacketProcessor {
+    private val peerQueues: MutableMap<String, Channel<RoutedPacket>> = mutableMapOf()
+
+    fun process(packet: RoutedPacket) {
+        val peerId = packet.packet.senderIdHex()
+        queueFor(peerId).trySend(packet)
+    }
+}
+```
+
+## Message Router
+
+Responsibilities:
+
+- send public message
+- send private message
+- start handshake if needed
+- queue private message until session exists
+- route inbound decrypted messages to store/UI
+- emit ACKs
+- retry pending messages
+
+Private send flow:
+
+```text
+user sends message to peer
+-> save message as Pending
+-> peer has established session?
+   -> yes: encrypt and send
+   -> no: initiate handshake and queue message
+-> packet accepted by BLE writer?
+   -> mark SentToTransport
+-> ACK received?
+   -> mark Delivered
+```
+
+Inbound private flow:
+
+```text
+receive ENCRYPTED packet
+-> recipient must be me
+-> find session for sender
+-> decrypt
+-> parse inner payload
+-> save message
+-> send encrypted ACK
+-> notify UI
+```
+
+## BLE Packet Writer
+
+Only one write should be active per GATT connection at a time.
+
+Use a queue:
+
+```kotlin
+data class OutboundBleWrite(
+    val linkId: String,
+    val packetId: ByteArray,
+    val bytes: ByteArray,
+    val createdAtMs: Long,
+    val completion: CompletableDeferred<Boolean>
+)
+```
+
+Writer behavior:
+
+```text
+enqueue write
+if no active write: start next
+onCharacteristicWrite callback:
+    complete active write
+    start next
+on timeout:
+    fail active write
+    close link if needed
+    start next
+```
+
+For server notifications, also serialize notifications per subscribed device.
+
+Do not write concurrently to the same `BluetoothGatt`.
+
+## Foreground Service
+
+Use a foreground service for long-running Bluetooth operation.
+
+Service responsibilities:
+
+- start MeshController
+- maintain notification
+- stop cleanly
+- observe Bluetooth adapter state
+- restart scan/advertise after Bluetooth returns
+- expose binder or app-level singleton to ViewModels
+
+Service start:
+
+```text
+ensure permissions
+startForegroundService()
+inside service: call startForeground() quickly
+load identity
+start GATT server
+start advertising
+start scanning
+start periodic maintenance
+```
+
+Service stop:
+
+```text
+stop scanning
+stop advertising
+disconnect GATT clients
+close GATT server
+cancel coroutines
+flush stores
+stop foreground notification
+```
+
+Do not leave scanner callbacks, GATT callbacks, or coroutines active after stop.
+
+## Power Management
+
+Bluetooth scanning is expensive and Android may throttle it.
+
+Use modes:
+
+```kotlin
+enum class MeshPowerMode {
+    ForegroundActive,
+    ForegroundIdle,
+    Background,
+    BatterySaver
+}
+```
+
+Profiles:
+
+```text
+ForegroundActive:
+  scan mode: low latency
+  scan duty: continuous
+  announce: every 30s
+
+ForegroundIdle:
+  scan mode: balanced
+  scan duty: 10s on / 20s off
+  announce: every 60s
+
+Background:
+  scan mode: low power
+  scan duty: 5s on / 55s off
+  announce: every 2-5min
+
+BatterySaver:
+  scan mode: low power
+  scan duty: 1s on / 60s off
+  announce: every 5-10min
+```
+
+Keep active GATT connections alive if possible, but expect the OS to kill or
+throttle background work.
+
+## Reconnection Strategy
+
+Reconnection is the real meaning of long-term connection.
+
+On disconnect:
+
+```text
+mark link closed
+clear deviceAddress -> link
+keep peer identity
+mark peer disconnected
+schedule reconnect only when scan sees peer again
+```
+
+Avoid immediate reconnect loops. Use backoff:
+
+```text
+first retry: 5s
+second retry: 15s
+third retry: 30s
+max retry interval: 2min
+reset backoff after successful connection
+```
+
+If the scan result has the same short peer hint, prefer reconnecting. Still
+require ANNOUNCE and handshake before trusting identity.
+
+## Local Storage
+
+Use a database for messages and peer metadata. Room is a good Android choice.
+
+Tables:
+
+```text
+local_identity_metadata
+peers
+messages
+pending_outbound
+seen_packets
+trusted_keys
+```
+
+### peers
+
+```text
+peer_id TEXT PRIMARY KEY
+display_name TEXT NOT NULL
+noise_public_key BLOB NOT NULL
+signing_public_key BLOB NOT NULL
+verified INTEGER NOT NULL
+trusted INTEGER NOT NULL
+first_seen_ms INTEGER NOT NULL
+last_seen_ms INTEGER NOT NULL
+last_connected_ms INTEGER
+```
+
+### messages
+
+```text
+message_id TEXT PRIMARY KEY
+packet_id BLOB
+sender_id TEXT NOT NULL
+recipient_id TEXT
+body TEXT NOT NULL
+is_private INTEGER NOT NULL
+created_at_ms INTEGER NOT NULL
+received_at_ms INTEGER
+status TEXT NOT NULL
+direction TEXT NOT NULL
+```
+
+### pending_outbound
+
+```text
+id TEXT PRIMARY KEY
+peer_id TEXT NOT NULL
+message_id TEXT NOT NULL
+encoded_payload BLOB NOT NULL
+requires_encryption INTEGER NOT NULL
+attempt_count INTEGER NOT NULL
+next_attempt_ms INTEGER NOT NULL
+created_at_ms INTEGER NOT NULL
+expires_at_ms INTEGER NOT NULL
+```
+
+Store only synthetic test data in fixtures. Do not include real messages in
+tests, examples, screenshots, or documentation.
+
+## Onboarding
+
+Minimal flow:
+
+```text
+Screen 1: choose display name
+Screen 2: request Bluetooth permissions
+Screen 3: explain foreground service requirement
+Screen 4: start mesh
+```
+
+Implementation:
+
+```text
+user enters display name
+-> validate length and characters
+-> IdentityManager.loadOrCreate { displayName }
+-> request Bluetooth permissions
+-> start MeshForegroundService
+-> navigate to chat
+```
+
+Display name rules:
+
+```text
+min length: 1 character
+max UTF-8 bytes: 64
+trim leading/trailing whitespace
+reject control characters
+allow duplicate names because peerId is the real identity
+```
+
+## UI State
+
+Expose state as immutable flows:
+
+```kotlin
+data class MeshUiState(
+    val localPeerId: String,
+    val displayName: String,
+    val bluetoothReadiness: BluetoothReadiness,
+    val serviceRunning: Boolean,
+    val peers: List<PeerListItem>,
+    val currentConversation: List<ChatMessage>,
+    val errors: List<UserVisibleError>
+)
+```
+
+ViewModels should call use-case methods:
+
+```kotlin
+sendPublicMessage(text)
+sendPrivateMessage(peerId, text)
+startMesh()
+stopMesh()
+renameSelf(name)
+forgetPeer(peerId)
+```
+
+Do not expose raw Bluetooth callbacks to UI.
+
+## Error Handling
+
+Expected errors:
+
+- permission denied
+- Bluetooth disabled
+- scanner unavailable
+- advertiser unavailable
+- GATT service discovery failed
+- MTU negotiation failed
+- notification subscription failed
+- write timeout
+- malformed packet
+- invalid signature
+- peer identity mismatch
+- handshake timeout
+- decryption failed
+
+Most errors should be local state changes, not crashes.
+
+Fail closed for security:
+
+```text
+invalid signature -> drop
+identity mismatch -> drop and destroy session candidate
+decryption failure -> drop
+malformed packet -> drop
+oversized payload -> drop
+fragment limit exceeded -> drop reassembly
+```
+
+## Testing Plan
+
+### Unit Tests
+
+Test without Bluetooth hardware:
+
+- peer ID derivation
+- identity load/create behavior
+- announcement TLV encode/decode
+- packet encode/decode golden vectors
+- signature preimage stability
+- invalid signature rejection
+- packet dedup cache
+- TTL decrement
+- relay decision matrix
+- fragmentation/reassembly
+- malformed fragment rejection
+- ACK retry scheduling
+- message status transitions
+
+### Fake BLE Tests
+
+Create interfaces around Android BLE APIs:
+
+```kotlin
+interface BleScannerAdapter
+interface BleAdvertiserAdapter
+interface GattClientAdapter
+interface GattServerAdapter
+```
+
+Then test:
+
+- scan start/stop
+- scan result deduplication
+- connect timeout
+- service discovery failure
+- notification subscription failure
+- write serialization
+- disconnect cleanup
+- reconnect backoff
+
+### Physical Device Tests
+
+At minimum, validate with two Android devices:
+
+1. install debug app on both
+2. grant permissions
+3. start mesh on both
+4. each discovers the other
+5. each connects to the other or one side connects successfully
+6. announcements exchanged
+7. private handshake completes
+8. encrypted message A -> B delivered and ACKed
+9. encrypted message B -> A delivered and ACKed
+10. turn Bluetooth off on A
+11. B marks A disconnected
+12. turn Bluetooth on on A
+13. devices rediscover and reconnect
+14. encrypted messages work again
+
+For mesh forwarding, validate with three devices:
+
+```text
+A connected to B
+B connected to C
+A not directly connected to C
+A sends to C
+B relays
+C receives once
+TTL decrements
+duplicates are dropped
+```
+
+## Build Milestones
+
+### Milestone 1: Identity
+
+Deliver:
+
+- onboarding display name
+- persistent X25519 keypair
+- persistent Ed25519 keypair
+- peer ID derivation
+- identity clear/rotate function
+
+Acceptance:
+
+- app restart keeps same peer ID
+- clearing app data creates a new peer ID
+- display name change does not change peer ID
+
+### Milestone 2: BLE Discovery
+
+Deliver:
+
+- permission flow
+- foreground service
+- BLE advertiser
+- BLE scanner
+- scan result list
+
+Acceptance:
+
+- two devices see each other
+- no private data is in advertisement
+- scanner restarts after Bluetooth toggle
+
+### Milestone 3: GATT Link
+
+Deliver:
+
+- GATT server with packet characteristic
+- GATT client connect/discover/subscribe
+- serialized writes
+- link tracking
+
+Acceptance:
+
+- one device can write bytes to the other
+- both sides can receive test PING/PONG packets
+- disconnect cleans link state
+
+### Milestone 4: Packets and Announcements
+
+Deliver:
+
+- binary packet codec
+- packet signing
+- announcement TLV
+- peer manager
+
+Acceptance:
+
+- peers show display name and peer ID
+- invalid announcement is rejected
+- app restart preserves local peer ID
+
+### Milestone 5: Direct Plaintext Chat
+
+Deliver:
+
+- public MESSAGE packet
+- message store
+- ACK packet
+- retry manager
+
+Acceptance:
+
+- A sends message to B
+- B stores and displays message
+- B sends ACK
+- A marks message delivered
+
+This milestone intentionally uses plaintext for transport debugging only. Do not
+ship private chat this way.
+
+### Milestone 6: Encrypted Private Chat
+
+Deliver:
+
+- Noise handshake
+- encrypted private payloads
+- session state
+- queued send until session exists
+
+Acceptance:
+
+- A taps B and sends private message
+- app performs handshake automatically
+- message payload is encrypted on the wire
+- B decrypts and ACKs
+- failed identity binding rejects session
+
+### Milestone 7: Reconnect and Store Forward
+
+Deliver:
+
+- pending outbound table
+- retry on peer seen
+- session re-establishment
+- disconnected peer grace period
+
+Acceptance:
+
+- send while peer offline queues message
+- peer returns
+- app reconnects
+- session re-establishes
+- queued message sends
+
+### Milestone 8: Mesh Relay
+
+Deliver:
+
+- TTL
+- seen packet cache
+- relay manager
+- broadcast relay
+
+Acceptance:
+
+- three-device relay works
+- duplicate packets are not displayed twice
+- TTL prevents infinite loops
+
+## Minimal Class Skeletons
+
+### MeshController
+
+```kotlin
+class MeshController(
+    private val identityManager: IdentityManager,
+    private val bleConnectionManager: BleConnectionManager,
+    private val packetProcessor: PacketProcessor,
+    private val messageRouter: MessageRouter,
+    private val peerManager: PeerManager
+) {
+    suspend fun start() {
+        val identity = identityManager.getLocalIdentity()
+        packetProcessor.localPeerId = identity.peerId
+        bleConnectionManager.packetListener = packetProcessor::process
+        bleConnectionManager.start(identity)
+        messageRouter.start(identity)
+    }
+
+    suspend fun stop() {
+        bleConnectionManager.stop()
+        messageRouter.stop()
+    }
+}
+```
+
+### BleConnectionManager
+
+```kotlin
+class BleConnectionManager(
+    private val scanner: BleScanner,
+    private val advertiser: BleAdvertiser,
+    private val gattClient: BleGattClient,
+    private val gattServer: BleGattServer,
+    private val tracker: BleConnectionTracker
+) {
+    var packetListener: ((RoutedPacket) -> Unit)? = null
+
+    suspend fun start(identity: LocalIdentity) {
+        gattServer.start()
+        advertiser.start(identity.peerId)
+        scanner.start { result ->
+            onScanResult(result)
+        }
+    }
+
+    suspend fun stop() {
+        scanner.stop()
+        advertiser.stop()
+        gattClient.closeAll()
+        gattServer.stop()
+        tracker.clear()
+    }
+}
+```
+
+### MessageRouter
+
+```kotlin
+class MessageRouter(
+    private val peerManager: PeerManager,
+    private val sessionManager: CryptoSessionManager,
+    private val packetSender: PacketSender,
+    private val messageStore: MessageStore
+) {
+    suspend fun sendPrivateMessage(peerId: String, body: String) {
+        val message = messageStore.createPendingPrivate(peerId, body)
+        val session = sessionManager.getEstablishedSession(peerId)
+
+        if (session == null) {
+            sessionManager.initiate(peerId)
+            messageStore.queueUntilSession(message.id, peerId)
+            return
+        }
+
+        val encrypted = sessionManager.encrypt(peerId, encodeMessage(message))
+        packetSender.sendEncrypted(peerId, encrypted)
+        messageStore.markSentToTransport(message.id)
+    }
+}
+```
+
+## Common Failure Modes
+
+### The devices scan but never connect
+
+Check:
+
+- service UUID in advertiser and scanner match
+- app has runtime permissions
+- Bluetooth is enabled
+- scan filter is not too strict
+- pending connection map is not stuck
+- connection attempts are not rate-limited forever
+
+### Devices connect but no packets arrive
+
+Check:
+
+- characteristic UUID matches
+- notifications are enabled
+- server handles writes
+- client handles notifications
+- write queue gets completion callbacks
+- MTU assumptions are not too large
+
+### Peer identity changes every restart
+
+Check:
+
+- keys are saved after generation
+- encrypted prefs are not being cleared
+- debug builds are not wiping app data on install
+- load failure is not causing silent regeneration
+- peer ID derives from persistent public key, not random UUID each start
+
+### Handshake completes with wrong peer
+
+Check:
+
+- derived peer ID from remote static key is compared with claimed peer ID
+- candidate sessions are destroyed on mismatch
+- announcements are signed
+- signing keys are stored per peer
+- old peer key replacement is not accepted silently
+
+### Messages duplicate
+
+Check:
+
+- packet ID dedup happens before display
+- fragment reassembly does not process twice
+- relay excludes ingress link where possible
+- ACK retries reuse same message ID
+- message store has unique constraint on message ID
+
+## Security Checklist
+
+- persistent private keys are encrypted at rest
+- peer ID derives from public key
+- announcements include public keys
+- announcements are signed
+- announcement sender ID must match derived public key ID
+- private messages require established encrypted session
+- handshake binds remote static key to claimed peer ID
+- invalid signatures are dropped
+- malformed packets are dropped
+- oversized packets are dropped
+- replayed packet IDs are dropped
+- TTL prevents relay loops
+- private payloads are not logged
+- raw Bluetooth addresses are not used as identity
+- real user messages are not used in tests or fixtures
+
+## Recommended Implementation Order
+
+Build in this order:
+
+```text
+1. Persistent identity
+2. Packet codec
+3. Foreground service shell
+4. BLE advertise/scan
+5. GATT connect and byte transfer
+6. ANNOUNCE packets
+7. Peer list
+8. Plain test messages
+9. ACK and retry
+10. Noise handshake
+11. Encrypted private messages
+12. Message persistence
+13. Reconnect and queued sends
+14. Fragmentation
+15. Mesh relay
+16. Power profiles
+17. Physical-device test matrix
+```
+
+Do not start with mesh relay. If direct encrypted chat is unreliable, mesh relay
+will make debugging much harder.
+
+## Definition of Done
+
+The implementation is complete when:
+
+- identity persists across app restart
+- two devices discover each other over BLE
+- two devices connect over GATT
+- each device receives and validates the other's announcement
+- peer ID is derived from public key, not Bluetooth address
+- private handshake establishes an authenticated encrypted session
+- encrypted message round trip works both directions
+- delivery ACK updates message status
+- disconnect updates peer state without deleting identity
+- reconnect works after Bluetooth toggle
+- queued private message sends after peer returns
+- large messages fragment and reassemble
+- duplicate packets do not duplicate UI messages
+- three-device relay works if mesh forwarding is enabled
+- all Bluetooth resources stop cleanly
+- unit tests cover codec, identity, relay, fragments, ACKs, and crypto state
+- physical-device tests pass on at least two Android devices
