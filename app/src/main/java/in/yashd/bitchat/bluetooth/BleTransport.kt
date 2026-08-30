@@ -15,7 +15,6 @@ import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -299,13 +298,10 @@ class BleTransport(
     }
 
     private fun startScanning() {
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(BleUuids.SERVICE_UUID))
-            .build()
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
-        scanner?.startScan(listOf(filter), settings, scanCallback)
+        scanner?.startScan(null, settings, scanCallback)
     }
 
     private fun drainWrites() {
