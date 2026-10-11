@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -92,6 +93,20 @@ private fun MeshChatApp() {
 
     LaunchedEffect(Unit) {
         MeshRuntime.refreshReadiness()
+    }
+
+    // Per-chat filtering: public feed vs. private chat with the selected peer
+    val visibleMessages = remember(state.currentConversation, selectedPeerId) {
+        state.currentConversation.filter { message ->
+            if (selectedPeerId == null) {
+                // public chat: only broadcast messages
+                message.recipientId == null
+            } else {
+                // private chat: only encrypted messages to/from the selected peer
+                message.isPrivate &&
+                        (message.senderId == selectedPeerId || message.recipientId == selectedPeerId)
+            }
+        }
     }
 
     Scaffold(
@@ -166,12 +181,12 @@ private fun MeshChatApp() {
             item {
                 SectionLabel("messages")
             }
-            if (state.currentConversation.isEmpty()) {
+            if (visibleMessages.isEmpty()) {
                 item {
                     EmptyRow("send a public message or select a peer for encrypted direct chat")
                 }
             } else {
-                items(state.currentConversation) { message ->
+                items(visibleMessages) { message ->
                     MessageRow(message)
                 }
             }
@@ -213,6 +228,30 @@ private fun IdentityPanel(
 ) {
     var editing by rememberSaveable { mutableStateOf(false) }
     var draftName by rememberSaveable(state.displayName) { mutableStateOf(state.displayName) }
+    var confirmRotate by rememberSaveable { mutableStateOf(false) }
+
+    if (confirmRotate) {
+        AlertDialog(
+            onDismissRequest = { confirmRotate = false },
+            title = { Text("rotate identity?") },
+            text = {
+                Text("this creates a new peer id and new keys. nearby peers will see you as a different person, and the mesh will stop until you start it again.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRotate = false
+                    onRotate()
+                }) {
+                    Text("rotate")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRotate = false }) {
+                    Text("cancel")
+                }
+            }
+        )
+    }
 
     CompactCard {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -247,7 +286,7 @@ private fun IdentityPanel(
                     TextButton(onClick = { editing = !editing }) {
                         Text("rename", style = MaterialTheme.typography.labelMedium)
                     }
-                    TextButton(onClick = onRotate) {
+                    TextButton(onClick = { confirmRotate = true }) {
                         Text("rotate", style = MaterialTheme.typography.labelMedium)
                     }
                 }
