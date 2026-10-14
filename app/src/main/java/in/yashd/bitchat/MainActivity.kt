@@ -1,20 +1,27 @@
 package `in`.yashd.bitchat
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,10 +32,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -46,9 +57,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -57,6 +71,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -67,11 +82,17 @@ import `in`.yashd.bitchat.mesh.ChatMessage
 import `in`.yashd.bitchat.mesh.MeshRuntime
 import `in`.yashd.bitchat.mesh.MeshUiState
 import `in`.yashd.bitchat.mesh.MessageDirection
+import `in`.yashd.bitchat.mesh.MessageStatus
 import `in`.yashd.bitchat.mesh.PeerConnectionState
 import `in`.yashd.bitchat.mesh.PeerState
 import `in`.yashd.bitchat.service.MeshForegroundService
 import `in`.yashd.bitchat.ui.theme.BitchatTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -136,8 +157,9 @@ private fun MeshChatApp() {
     }
 
     // Per-chat filtering: public feed vs. private chat with the selected peer
-    val visibleMessages = remember(state.currentConversation, selectedPeerId) {
-        state.currentConversation.filter { message ->
+    val retriedIds = remember { mutableStateListOf<String>() }
+    val visibleMessages = remember(state.currentConversation, selectedPeerId, retriedIds.size) {
+        state.currentConversation.filter { it.messageId !in retriedIds }.filter { message ->
             if (selectedPeerId == null) {
                 // public chat: only broadcast messages
                 message.recipientId == null
@@ -150,6 +172,35 @@ private fun MeshChatApp() {
     }
 
     val selectedPeerName = state.peers.firstOrNull { it.identity.peerId == selectedPeerId }?.identity?.displayName
+    val peerNames = remember(state.peers) {
+        state.peers.associate { it.identity.peerId to it.identity.displayName }
+    }
+    val chatListState = rememberLazyListState()
+
+    // unread badge: inbound messages that arrived while the chat tab was not open
+    var lastReadMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(tab, state.currentConversation) {
+        if (tab == MainTab.Chat) lastReadMs = System.currentTimeMillis()
+    }
+    val unreadCount = if (tab == MainTab.Chat) 0 else state.currentConversation.count {
+        it.direction == MessageDirection.Inbound && (it.receivedAtMs ?: it.createdAtMs) > lastReadMs
+    }
+
+    val onCopyMessage: (ChatMessage) -> Unit = { message ->
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("message", message.body))
+        Toast.makeText(context, "message copied", Toast.LENGTH_SHORT).show()
+    }
+    val onRetryMessage: (ChatMessage) -> Unit = { message ->
+        val target = message.recipientId
+        if (target != null && state.peers.none { it.identity.peerId == target }) {
+            // never resend a private message unless the peer is nearby (it would go out unencrypted)
+            Toast.makeText(context, "peer not nearby, try again when they are back", Toast.LENGTH_SHORT).show()
+        } else {
+            retriedIds.add(message.messageId)
+            MeshRuntime.sendMessage(message.body, target)
+        }
+    }
 
     Scaffold(
         modifier = Modifier.imePadding(),
@@ -171,10 +222,21 @@ private fun MeshChatApp() {
                 }
                 NavigationBar {
                     tabs.forEachIndexed { index, item ->
+                        val badgeCount = if (item == MainTab.Chat) unreadCount else 0
                         NavigationBarItem(
                             selected = index == tabIndex,
                             onClick = { tabIndex = index },
-                            icon = { Text(item.glyph) },
+                            icon = {
+                                BadgedBox(
+                                    badge = {
+                                        if (badgeCount > 0) {
+                                            Badge { Text(if (badgeCount > 9) "9+" else "$badgeCount") }
+                                        }
+                                    }
+                                ) {
+                                    Text(item.glyph)
+                                }
+                            },
                             label = { Text(item.label, style = MaterialTheme.typography.labelSmall) }
                         )
                     }
@@ -201,9 +263,15 @@ private fun MeshChatApp() {
             MainTab.Chat -> ChatTab(
                 state = state,
                 messages = visibleMessages,
+                peerNames = peerNames,
+                now = now,
+                conversationKey = selectedPeerId,
                 selectedPeerName = selectedPeerName,
+                listState = chatListState,
                 modifier = Modifier.padding(innerPadding),
-                onBackToPublic = { selectedPeerId = null }
+                onBackToPublic = { selectedPeerId = null },
+                onCopy = onCopyMessage,
+                onRetry = onRetryMessage
             )
 
             MainTab.Settings -> SettingsTab(
@@ -263,24 +331,123 @@ private fun PeersTab(
     }
 }
 
+private sealed class ChatRow {
+    data class DateHeader(val dayKey: Int, val label: String) : ChatRow()
+    data class Bubble(
+        val message: ChatMessage,
+        val senderName: String,
+        val showName: Boolean
+    ) : ChatRow()
+}
+
+private fun dayKey(ms: Long, dayOffset: Int = 0): Int {
+    val calendar = Calendar.getInstance()
+    calendar.timeInMillis = ms
+    calendar.add(Calendar.DAY_OF_YEAR, dayOffset)
+    return calendar.get(Calendar.YEAR) * 1000 + calendar.get(Calendar.DAY_OF_YEAR)
+}
+
+private fun dayLabel(ms: Long, now: Long): String {
+    val key = dayKey(ms)
+    return when (key) {
+        dayKey(now) -> "Today"
+        dayKey(now, -1) -> "Yesterday"
+        else -> SimpleDateFormat("EEE, d MMM yyyy", Locale.getDefault()).format(Date(ms))
+    }
+}
+
+private fun formatTime(ms: Long): String =
+    SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(ms))
+
+private fun buildChatRows(
+    messages: List<ChatMessage>,
+    peerNames: Map<String, String>,
+    now: Long
+): List<ChatRow> {
+    val rows = ArrayList<ChatRow>(messages.size + 4)
+    var lastDay = -1
+    var lastSender: String? = null
+    for (message in messages) {
+        val day = dayKey(message.createdAtMs)
+        if (day != lastDay) {
+            rows.add(ChatRow.DateHeader(day, dayLabel(message.createdAtMs, now)))
+            lastDay = day
+            lastSender = null
+        }
+        val mine = message.direction == MessageDirection.Outbound
+        val name = if (mine) "me" else (peerNames[message.senderId] ?: message.senderId.take(8))
+        rows.add(ChatRow.Bubble(message, name, showName = message.senderId != lastSender))
+        lastSender = message.senderId
+    }
+    return rows
+}
+
 @Composable
 private fun ChatTab(
     state: MeshUiState,
     messages: List<ChatMessage>,
+    peerNames: Map<String, String>,
+    now: Long,
+    conversationKey: String?,
     selectedPeerName: String?,
+    listState: LazyListState,
     modifier: Modifier = Modifier,
-    onBackToPublic: () -> Unit
+    onBackToPublic: () -> Unit,
+    onCopy: (ChatMessage) -> Unit,
+    onRetry: (ChatMessage) -> Unit
 ) {
-    LazyColumn(
+    val today = dayKey(now)
+    val rows = remember(messages, peerNames, today) { buildChatRows(messages, peerNames, now) }
+    val scope = rememberCoroutineScope()
+
+    val atBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()
+            last == null || last.index >= info.totalItemsCount - 1
+        }
+    }
+    // read during composition, so it still holds the value from before a new message is laid out
+    val wasAtBottom = atBottom
+    val newestIsMine = messages.lastOrNull()?.direction == MessageDirection.Outbound
+    val lastIndex = rows.size - 1
+
+    var unseen by remember { mutableStateOf(0) }
+    var prevKey by remember { mutableStateOf(conversationKey) }
+    var prevCount by remember { mutableStateOf(-1) }
+
+    LaunchedEffect(conversationKey, messages.size) {
+        if (prevCount == -1 || prevKey != conversationKey) {
+            // opened the chat or switched conversation: jump to the newest message
+            unseen = 0
+            if (lastIndex >= 0) listState.scrollToItem(lastIndex)
+        } else if (messages.size > prevCount) {
+            if (wasAtBottom || newestIsMine) {
+                unseen = 0
+                if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
+            } else {
+                unseen += messages.size - prevCount
+            }
+        }
+        prevKey = conversationKey
+        prevCount = messages.size
+    }
+    LaunchedEffect(atBottom) {
+        if (atBottom) unseen = 0
+    }
+
+    Column(
         modifier = modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-        contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+            .background(MaterialTheme.colorScheme.background)
     ) {
-        topItems(state)
+        if (state.errors.isNotEmpty()) {
+            Box(modifier = Modifier.padding(start = 16.dp, top = 12.dp, end = 16.dp)) {
+                ErrorPanel(state.errors)
+            }
+        }
         if (selectedPeerName != null) {
-            item {
+            Box(modifier = Modifier.padding(start = 16.dp, top = 12.dp, end = 16.dp)) {
                 CompactCard {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -302,17 +469,85 @@ private fun ChatTab(
                 }
             }
         }
-        item {
-            SectionLabel("messages")
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+        ) {
+            if (rows.isEmpty()) {
+                Box(modifier = Modifier.padding(16.dp)) {
+                    EmptyRow("send a public message or select a peer for encrypted direct chat")
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    items(
+                        rows,
+                        key = { row ->
+                            when (row) {
+                                is ChatRow.DateHeader -> "date-${row.dayKey}"
+                                is ChatRow.Bubble -> row.message.messageId
+                            }
+                        }
+                    ) { row ->
+                        when (row) {
+                            is ChatRow.DateHeader -> DateSeparator(row.label)
+                            is ChatRow.Bubble -> MessageBubble(
+                                row = row,
+                                onCopy = { onCopy(row.message) },
+                                onRetry = { onRetry(row.message) }
+                            )
+                        }
+                    }
+                }
+            }
+            if (!atBottom && unseen > 0) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 12.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable {
+                            scope.launch {
+                                if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
+                                unseen = 0
+                            }
+                        },
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    shadowElevation = 4.dp
+                ) {
+                    Text(
+                        text = "\u2193 $unseen new",
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+            }
         }
-        if (messages.isEmpty()) {
-            item {
-                EmptyRow("send a public message or select a peer for encrypted direct chat")
-            }
-        } else {
-            items(messages) { message ->
-                MessageRow(message)
-            }
+    }
+}
+
+@Composable
+private fun DateSeparator(label: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+            Text(
+                text = label,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -682,34 +917,82 @@ private fun formatLastSeen(lastSeenMs: Long?, now: Long): String {
 }
 
 @Composable
-private fun MessageRow(message: ChatMessage) {
-    val mine = message.direction == MessageDirection.Outbound
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start
+private fun FailedBadge(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(28.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.error)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
     ) {
+        Text(
+            text = "!",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onError
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MessageBubble(row: ChatRow.Bubble, onCopy: () -> Unit, onRetry: () -> Unit) {
+    val message = row.message
+    val mine = message.direction == MessageDirection.Outbound
+    val failed = message.status == MessageStatus.Failed
+    val shape = RoundedCornerShape(8.dp)
+    val statusText = when (message.status) {
+        MessageStatus.Pending -> "sending"
+        MessageStatus.SentToTransport -> "sent"
+        MessageStatus.Delivered -> "delivered"
+        MessageStatus.Read -> "read"
+        MessageStatus.Failed -> "failed, tap to retry"
+    }
+    val footer = "${formatTime(message.createdAtMs)} / $statusText / ${if (message.isPrivate) "encrypted" else "public"}"
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = if (row.showName) 8.dp else 0.dp),
+        horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (mine && failed) {
+            FailedBadge(onClick = onRetry)
+            Spacer(modifier = Modifier.width(6.dp))
+        }
         Surface(
-            modifier = Modifier.fillMaxWidth(0.86f),
-            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.86f)
+                .clip(shape)
+                .combinedClickable(
+                    onClick = { if (failed) onRetry() },
+                    onLongClick = onCopy
+                ),
+            shape = shape,
             color = if (mine) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
         ) {
             Column(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                if (row.showName) {
                     Text(
-                        text = if (mine) "me" else message.senderId.take(8),
+                        text = row.senderName,
                         style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = "${message.status.name.lowercase()} / ${if (message.isPrivate) "encrypted" else "public"}",
-                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Text(message.body, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
+                Text(
+                    text = footer,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.End,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
