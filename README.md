@@ -7,9 +7,10 @@ Built with Kotlin and Jetpack Compose.
 ---
 
 ## Screenshots
+<img width="409" height="907" alt="image" src="https://github.com/user-attachments/assets/f98311bd-b3db-468c-8c19-23d7359fe03f" />
+<img width="410" height="908" alt="image" src="https://github.com/user-attachments/assets/5a39a0f8-33f8-4180-90c2-ca489289094f" />
 
-<img width="338" height="387" alt="image" src="https://github.com/user-attachments/assets/8cf8eef6-d8de-4b6c-83ca-4bddf7d4a590" />
-<img width="338" height="387" alt="image" src="https://github.com/user-attachments/assets/9008af98-dd7e-4ff5-8c06-7780090a6551" />
+
 
 ---
 
