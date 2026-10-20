@@ -8,8 +8,13 @@ lifecycleRuntimeKtx = "2.11.0"
 activityCompose = "1.13.0"
 kotlin = "2.2.10"
 composeBom = "2026.02.01"
+secp256k1 = "0.23.0"
+serializationJson = "1.9.0"
 
 [libraries]
+secp256k1-android = { module = "fr.acinq.secp256k1:secp256k1-kmp-jni-android", version.ref = "secp256k1" }
+secp256k1-jvm = { module = "fr.acinq.secp256k1:secp256k1-kmp-jni-jvm", version.ref = "secp256k1" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serializationJson" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }

@@ -38,6 +38,10 @@ android {
 }
 
 dependencies {
+    implementation(libs.secp256k1.android)
+    implementation(libs.kotlinx.serialization.json)
+    // Local unit tests need desktop native binaries, not the Android JNI binaries.
+    testImplementation(libs.secp256k1.jvm)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
