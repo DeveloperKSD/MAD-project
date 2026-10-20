@@ -1,6 +1,7 @@
 package `in`.yashd.bitchat.nostr
 
 import java.security.MessageDigest
+import kotlinx.serialization.json.*
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -42,6 +43,28 @@ object NostrEventCodec {
             put("content", data.content)
             put("sig", event.sig)
         }.toString()
+    }
+
+    /** Decode structure strictly; callers must verify authenticity before accepting the event. */
+    fun decode(text: String): NostrEvent {
+        val obj = Json.parseToJsonElement(text).jsonObject
+        fun str(key: String) = NostrRelayProtocol.string(obj.getValue(key))
+        fun number(key: String): Long {
+            val value = obj.getValue(key).jsonPrimitive
+            // The JSON library accepts bare tokens such as +100 and 0100; neither
+            // is a valid JSON integer. Reject them rather than normalizing before hashing.
+            require(!value.isString && value.content.matches(Regex("0|[1-9][0-9]*")))
+            return requireNotNull(value.longOrNull)
+        }
+        val kind = number("kind")
+        require(kind in 0..65535)
+        val event = NostrEvent(str("id"), UnsignedNostrEvent(
+            str("pubkey"), number("created_at"), kind.toInt(),
+            obj.getValue("tags").jsonArray.map { tag -> tag.jsonArray.map(NostrRelayProtocol::string) },
+            str("content")
+        ), str("sig"))
+        encode(event) // Apply the same field constraints as outgoing events.
+        return event
     }
 
     private fun tagsJson(tags: List<List<String>>) =
