@@ -33,38 +33,73 @@ object NostrEventCodec {
         validate(event.unsignedEvent)
         require(event.id.isLowercaseHex(32)) { "Event ID must be 32 bytes of lowercase hex" }
         require(event.sig.isLowercaseHex(64)) { "Signature must be 64 bytes of lowercase hex" }
-        val data = event.unsignedEvent
-        return buildJsonObject {
-            put("id", event.id)
-            put("pubkey", data.pubkey)
-            put("created_at", data.createdAtSeconds)
-            put("kind", data.kind)
-            put("tags", tagsJson(data.tags))
-            put("content", data.content)
-            put("sig", event.sig)
-        }.toString()
+        return JsonObject(fields(event.id, event.unsignedEvent) + ("sig" to JsonPrimitive(event.sig))).toString()
     }
 
     /** Decode structure strictly; callers must verify authenticity before accepting the event. */
     fun decode(text: String): NostrEvent {
-        val obj = Json.parseToJsonElement(text).jsonObject
+        val obj = parseObject(text)
+        val event = NostrEvent(NostrRelayProtocol.string(obj.getValue("id")),
+            decodeFields(obj), NostrRelayProtocol.string(obj.getValue("sig")))
+        encode(event) // Apply the same field constraints as outgoing events.
+        return event
+    }
+
+    /** NIP-59 rumor: includes its content hash, but never a signature. */
+    fun encodeRumor(event: UnsignedNostrEvent): String = fields(calculateId(event), event).toString()
+
+    fun decodeRumor(text: String): UnsignedNostrEvent {
+        val obj = parseObject(text)
+        require("sig" !in obj) { "Rumor must be unsigned" }
+        val event = decodeFields(obj)
+        require(NostrRelayProtocol.string(obj.getValue("id")) == calculateId(event)) { "Invalid rumor ID" }
+        return event
+    }
+
+    private fun parseObject(text: String): JsonObject {
+        // Encrypted JSON bypasses the relay decoder's nesting limit. Bound it before
+        // the recursive tree parser; even a correctly signed sender can send hostile JSON.
+        var depth = 0
+        var quoted = false
+        var escaped = false
+        for (char in text) {
+            if (quoted) {
+                if (escaped) escaped = false
+                else if (char == '\\') escaped = true
+                else if (char == '"') quoted = false
+            } else when (char) {
+                '"' -> quoted = true
+                '[', '{' -> { depth++; require(depth <= 32) { "Event JSON nesting limit exceeded" } }
+                ']', '}' -> depth--
+            }
+        }
+        return Json.parseToJsonElement(text).jsonObject
+    }
+
+    private fun fields(id: String, data: UnsignedNostrEvent) = buildJsonObject {
+        put("id", id)
+        put("pubkey", data.pubkey)
+        put("created_at", data.createdAtSeconds)
+        put("kind", data.kind)
+        put("tags", tagsJson(data.tags))
+        put("content", data.content)
+    }
+
+    private fun decodeFields(obj: JsonObject): UnsignedNostrEvent {
         fun str(key: String) = NostrRelayProtocol.string(obj.getValue(key))
         fun number(key: String): Long {
             val value = obj.getValue(key).jsonPrimitive
-            // The JSON library accepts bare tokens such as +100 and 0100; neither
-            // is a valid JSON integer. Reject them rather than normalizing before hashing.
+            // Reject non-JSON integer spellings accepted by the JSON library.
             require(!value.isString && value.content.matches(Regex("0|[1-9][0-9]*")))
             return requireNotNull(value.longOrNull)
         }
         val kind = number("kind")
         require(kind in 0..65535)
-        val event = NostrEvent(str("id"), UnsignedNostrEvent(
+        return UnsignedNostrEvent(
             str("pubkey"), number("created_at"), kind.toInt(),
             obj.getValue("tags").jsonArray.map { tag -> tag.jsonArray.map(NostrRelayProtocol::string) },
             str("content")
-        ), str("sig"))
-        encode(event) // Apply the same field constraints as outgoing events.
-        return event
+        ).also(::validate)
     }
 
     private fun tagsJson(tags: List<List<String>>) =
