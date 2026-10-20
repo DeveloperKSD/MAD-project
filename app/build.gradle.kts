@@ -41,6 +41,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.80.2")
     implementation(libs.secp256k1.android)
     implementation(libs.kotlinx.serialization.json)
     // Local unit tests need desktop native binaries, not the Android JNI binaries.
