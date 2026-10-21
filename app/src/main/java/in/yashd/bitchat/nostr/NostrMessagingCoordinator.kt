@@ -18,7 +18,8 @@ class NostrMessagingCoordinator(
     private val timeoutMillis: Long = 5_000,
     private val onPublication: (Publication) -> Unit = {},
     private val onReceived: (UnsignedNostrEvent) -> Unit = {},
-    private val onRelayIssue: (String, Issue) -> Unit = { _, _ -> }
+    private val onRelayIssue: (String, Issue) -> Unit = { _, _ -> },
+    private val onInboxState: (String, NostrRelayClient.State) -> Unit = { _, _ -> }
 ) : Closeable {
     enum class Stage { QUEUED, SUBMITTED, RELAY_ACCEPTED, RELAY_REJECTED, FAILED, UNKNOWN }
     enum class Issue { AUTHENTICATION_REQUIRED, SUBSCRIPTION_CLOSED, CONNECTION_ERROR, INVALID_MESSAGE, RECEIVE_QUEUE_FULL }
@@ -146,13 +147,16 @@ class NostrMessagingCoordinator(
         require(policy.relays(event, event.unsignedEvent.pubkey) != null)
         return discovery.map { checkActive(); publish(it, event) }
     }
-    fun send(recipient: String, text: String): Future<SendResult> = task {
+    fun send(recipient: String, text: String, onPrepared: (String) -> Unit = {}, beforePublish: (String) -> Unit = {}): Future<SendResult> = task {
         val local = identity.loadOrCreate().publicKeyHex
         // Resolve both lists before producing or publishing either copy.
         val recipientRelays = destinations(recipient)
         val senderRelays = if (recipient == local) recipientRelays else destinations(local)
         checkActive()
         val wraps = identity.withSecret { checkActive(); nip17.createMessage(it, recipient, text) }
+        beforePublish(wraps.rumorId)
+        checkActive()
+        notifyUser { onPrepared(wraps.rumorId) }
         SendResult(recipientRelays.map { publish(it, wraps.recipientCopy) },
             senderRelays.map { publish(it, wraps.senderCopy) })
     }
@@ -213,7 +217,10 @@ class NostrMessagingCoordinator(
                     is RelayResponse.Closed -> issue(url, Issue.SUBSCRIPTION_CLOSED)
                     else -> Unit
                 }
-            }, { if (it == NostrRelayClient.State.ERROR) issue(url, Issue.CONNECTION_ERROR) }, persistent = true)
+            }, { state ->
+                notifyUser { onInboxState(url, state) }
+                if (state == NostrRelayClient.State.ERROR) issue(url, Issue.CONNECTION_ERROR)
+            }, persistent = true)
             inboxes.add(c)
             c.subscribe("inbox", listOf(buildJsonObject {
                 put("kinds", JsonArray(listOf(JsonPrimitive(1059))))

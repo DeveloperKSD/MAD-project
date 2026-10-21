@@ -25,21 +25,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -48,13 +43,8 @@ import androidx.compose.material3.DividerDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,7 +67,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -88,10 +77,7 @@ import `in`.yashd.bitchat.mesh.MeshRuntime
 import `in`.yashd.bitchat.mesh.MeshUiState
 import `in`.yashd.bitchat.mesh.MessageDirection
 import `in`.yashd.bitchat.mesh.MessageStatus
-import `in`.yashd.bitchat.mesh.PeerConnectionState
-import `in`.yashd.bitchat.mesh.PeerState
 import `in`.yashd.bitchat.service.MeshForegroundService
-import `in`.yashd.bitchat.ui.theme.BitchatTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -100,14 +86,37 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+    private val internetModel by lazy {
+        androidx.lifecycle.ViewModelProvider(this, object : androidx.lifecycle.ViewModelProvider.Factory {
+            override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
+                @Suppress("UNCHECKED_CAST")
+                return `in`.yashd.bitchat.ui.relay.RelayViewModel(
+                    `in`.yashd.bitchat.ui.relay.AndroidInternetBackend(
+                        `in`.yashd.bitchat.nostr.NostrIdentityManager(applicationContext)),
+                    history = `in`.yashd.bitchat.data.internet.RoomInternetHistoryRepository(applicationContext)) as T
+            }
+        })[`in`.yashd.bitchat.ui.relay.RelayViewModel::class.java]
+    }
+
+    override fun onStart() {
+        super.onStart()
+        internetModel.start()
+    }
+
+    override fun onStop() {
+        internetModel.stop()
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
         MeshRuntime.initialize(applicationContext)
         setContent {
-            BitchatTheme {
-                MeshChatApp()
-            }
+            RelayMeshHost(internetModel)
         }
     }
 
@@ -118,264 +127,101 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class MainTab(val label: String, val glyph: String) {
-    Peers("peers", "◉"),
-    Chat("chat", "✉"),
-    Settings("settings", "⚙")
-}
-
 @Composable
-private fun MeshChatApp() {
+private fun RelayMeshHost(model: `in`.yashd.bitchat.ui.relay.RelayViewModel) {
     val context = LocalContext.current
     val state by MeshRuntime.state.collectAsState()
-    var selectedPeerId by rememberSaveable { mutableStateOf<String?>(null) }
-    var tabIndex by rememberSaveable { mutableStateOf(0) }
-    val tabs = MainTab.values()
-    val tab = tabs[tabIndex]
-
-    // ticks every 15s so "2m ago" keeps updating
-    var now by remember { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(15_000)
-            now = System.currentTimeMillis()
-        }
-    }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) {
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         MeshRuntime.refreshReadiness()
     }
-
-    LaunchedEffect(Unit) {
-        MeshRuntime.refreshReadiness()
-    }
-
-    val onRequestPermissions: () -> Unit = {
-        permissionLauncher.launch(runtimePermissions())
-    }
-    val onStart: () -> Unit = {
+    val request: () -> Unit = { launcher.launch(runtimePermissions()) }
+    val start: () -> Unit = {
         MeshRuntime.start()
-        ContextCompat.startForegroundService(
-            context,
-            Intent(context, MeshForegroundService::class.java)
-        )
+        ContextCompat.startForegroundService(context, Intent(context, MeshForegroundService::class.java))
     }
-    val onStop: () -> Unit = {
+    val stop: () -> Unit = {
         context.stopService(Intent(context, MeshForegroundService::class.java))
         MeshRuntime.stop()
     }
-
-    // Per-chat filtering: public feed vs. private chat with the selected peer
-    val retriedIds = remember { mutableStateListOf<String>() }
-    val visibleMessages = remember(state.currentConversation, selectedPeerId, retriedIds.size) {
-        state.currentConversation.filter { it.messageId !in retriedIds }.filter { message ->
-            if (selectedPeerId == null) {
-                // public chat: only broadcast messages
-                message.recipientId == null
-            } else {
-                // private chat: only encrypted messages to/from the selected peer
-                message.isPrivate &&
-                        (message.senderId == selectedPeerId || message.recipientId == selectedPeerId)
-            }
-        }
-    }
-
-    val selectedPeerName = state.peers.firstOrNull { it.identity.peerId == selectedPeerId }?.identity?.displayName
-    val peerNames = remember(state.peers) {
-        state.peers.associate { it.identity.peerId to it.identity.displayName }
-    }
-    val chatListState = rememberLazyListState()
-
-    val snackbarHostState = remember { SnackbarHostState() }
-    val snackScope = rememberCoroutineScope()
-    val showMessage: (String) -> Unit = { text ->
-        snackScope.launch {
-            snackbarHostState.currentSnackbarData?.dismiss()
-            snackbarHostState.showSnackbar(text)
-        }
-    }
-
-    // unread badge: inbound messages that arrived while the chat tab was not open
-    var lastReadMs by remember { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(tab, state.currentConversation) {
-        if (tab == MainTab.Chat) lastReadMs = System.currentTimeMillis()
-    }
-    val unreadCount = if (tab == MainTab.Chat) 0 else state.currentConversation.count {
-        it.direction == MessageDirection.Inbound && (it.receivedAtMs ?: it.createdAtMs) > lastReadMs
-    }
-
-    val onCopyMessage: (ChatMessage) -> Unit = { message ->
-        copyToClipboard(context, "message", message.body)
-        showMessage("Message copied")
-    }
-    val onCopyId: () -> Unit = {
-        if (state.localPeerId.isNotBlank()) {
-            copyToClipboard(context, "peer id", state.localPeerId)
-            showMessage("ID copied")
-        }
-    }
-    val onShareId: () -> Unit = {
-        if (state.localPeerId.isNotBlank()) {
-            val send = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_TEXT, "My bitchat ID: ${state.localPeerId}")
-            }
-            context.startActivity(Intent.createChooser(send, "Share your ID"))
-        }
-    }
-    val onOpenBluetoothSettings: () -> Unit = {
+    val bluetoothSettings: () -> Unit = {
         runCatching { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
-            .onFailure { showMessage("Couldn't open Bluetooth settings") }
+            .onFailure { model.error("Couldn’t open Bluetooth settings.") }
     }
-    val onRetryMessage: (ChatMessage) -> Unit = { message ->
-        val target = message.recipientId
-        if (target != null && state.peers.none { it.identity.peerId == target }) {
-            // never resend a private message unless the peer is nearby (it would go out unencrypted)
-            showMessage("Peer not nearby, try again when they are back")
-        } else {
-            retriedIds.add(message.messageId)
-            MeshRuntime.sendMessage(message.body, target)
-        }
-    }
-
-    Scaffold(
-        modifier = Modifier.imePadding(),
-        topBar = {
-            MeshControlBar(
-                state = state,
-                onRequestPermissions = onRequestPermissions,
-                onStart = onStart,
-                onStop = onStop
-            )
+    `in`.yashd.bitchat.ui.relay.RelayApp(model, state, start, stop, request, bluetoothSettings,
+        nearbyChat = { peerId, back, openGroup ->
+            NearbyConversationScreen(state, peerId, back, openGroup, model::error)
         },
-        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
-        bottomBar = {
-            Column {
-                if (tab == MainTab.Chat) {
-                    MessageComposer(
-                        selectedPeerName = selectedPeerName,
-                        onSend = { body -> MeshRuntime.sendMessage(body, selectedPeerId) }
-                    )
-                }
-                NavigationBar {
-                    tabs.forEachIndexed { index, item ->
-                        val badgeCount = if (item == MainTab.Chat) unreadCount else 0
-                        NavigationBarItem(
-                            selected = index == tabIndex,
-                            onClick = { tabIndex = index },
-                            icon = {
-                                BadgedBox(
-                                    badge = {
-                                        if (badgeCount > 0) {
-                                            Badge { Text(if (badgeCount > 9) "9+" else "$badgeCount") }
-                                        }
-                                    }
-                                ) {
-                                    Text(item.glyph)
-                                }
-                            },
-                            label = { Text(item.label, style = MaterialTheme.typography.labelSmall) }
-                        )
+        nearbySettings = {
+            item { SectionLabel("Nearby identity") }
+            item { IdentityPanel(state,
+                onRename = { MeshRuntime.renameSelf(it) },
+                onRotate = { MeshRuntime.rotateIdentity() },
+                onCopyId = { copyToClipboard(context, "Relay Nearby ID", state.localPeerId) },
+                onShareId = {
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, "My Relay Nearby ID: ${state.localPeerId}")
                     }
+                    context.startActivity(Intent.createChooser(intent, "Share your Relay ID"))
+                }) }
+            item {
+                var advanced by rememberSaveable { mutableStateOf(false) }
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Nearby connection", style = MaterialTheme.typography.titleMedium)
+                    Text(if (!state.bluetoothReadiness.hasBle) "Nearby isn’t available on this device. Internet messaging still works." else if (state.serviceRunning) "Nearby is on" else "Nearby is off", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (!state.bluetoothReadiness.hasPermissions) TextButton(onClick = request) { Text("Allow Bluetooth") }
+                    TextButton(onClick = bluetoothSettings) { Text("Open Bluetooth settings") }
+                    if (state.serviceRunning) TextButton(onClick = stop) { Text("Stop Nearby") }
+                    else Button(onClick = when {
+                        !state.bluetoothReadiness.hasPermissions -> request
+                        !state.bluetoothReadiness.bluetoothEnabled -> bluetoothSettings
+                        else -> start
+                    }, enabled = state.bluetoothReadiness.hasBle) { Text("Find Nearby") }
+                    TextButton(onClick = { advanced = !advanced }) { Text(if (advanced) "Hide Nearby Advanced" else "Nearby Advanced") }
+                    if (advanced) ReadinessPanel(state.bluetoothReadiness, state.serviceRunning, request, bluetoothSettings, start, stop)
                 }
             }
-        }
-    ) { innerPadding ->
-        when (tab) {
-            MainTab.Peers -> PeersTab(
-                state = state,
-                selectedPeerId = selectedPeerId,
-                now = now,
-                modifier = Modifier.padding(innerPadding),
-                onPeerClick = { peer ->
-                    if (selectedPeerId == peer.identity.peerId) {
-                        selectedPeerId = null
-                    } else {
-                        selectedPeerId = peer.identity.peerId
-                        tabIndex = MainTab.Chat.ordinal
-                    }
-                }
-            )
-
-            MainTab.Chat -> ChatTab(
-                state = state,
-                messages = visibleMessages,
-                peerNames = peerNames,
-                now = now,
-                conversationKey = selectedPeerId,
-                selectedPeerName = selectedPeerName,
-                listState = chatListState,
-                modifier = Modifier.padding(innerPadding),
-                onBackToPublic = { selectedPeerId = null },
-                onCopy = onCopyMessage,
-                onRetry = onRetryMessage
-            )
-
-            MainTab.Settings -> SettingsTab(
-                state = state,
-                modifier = Modifier.padding(innerPadding),
-                onRename = { name ->
-                    MeshRuntime.renameSelf(name)
-                    showMessage("Name updated")
-                },
-                onRotate = {
-                    MeshRuntime.rotateIdentity()
-                    showMessage("Identity rotated")
-                },
-                onCopyId = onCopyId,
-                onShareId = onShareId,
-                onRequestPermissions = onRequestPermissions,
-                onOpenBluetoothSettings = onOpenBluetoothSettings,
-                onStart = onStart,
-                onStop = onStop
-            )
-        }
-    }
-}
-
-private fun LazyListScope.topItems(state: MeshUiState) {
-    if (state.errors.isNotEmpty()) {
-        item {
-            ErrorPanel(state.errors)
-        }
-    }
+            item { AboutCard(runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "unknown") }
+        })
 }
 
 @Composable
-private fun PeersTab(
-    state: MeshUiState,
-    selectedPeerId: String?,
-    now: Long,
-    modifier: Modifier = Modifier,
-    onPeerClick: (PeerState) -> Unit
-) {
-    LazyColumn(
-        modifier = modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-        contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        topItems(state)
-        item {
-            SectionLabel("nearby")
+private fun NearbyConversationScreen(state: MeshUiState, peerId: String?, back: () -> Unit,
+    openGroup: () -> Unit, showError: (String) -> Unit) {
+    val retriedIds = remember { mutableStateListOf<String>() }
+    val messages = state.currentConversation.filter { message ->
+        message.messageId !in retriedIds && if (peerId == null) !message.isPrivate && message.recipientId == null
+        else message.isPrivate && (message.senderId == peerId || message.recipientId == peerId)
+    }
+    val name = if (peerId == null) null else state.peers.firstOrNull { it.identity.peerId == peerId }?.identity?.displayName ?: peerId.take(12)
+    val context = LocalContext.current
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) { while (true) { delay(15_000); now = System.currentTimeMillis() } }
+    val send: (String) -> Boolean = { body ->
+        `in`.yashd.bitchat.ui.relay.sendNearbySafely(body, peerId, MeshRuntime.state.value.peers, MeshRuntime::sendMessage).also {
+            if (!it) showError("This friend is no longer nearby. Find them in Discover before sending a private message.")
         }
-        if (state.peers.isEmpty()) {
-            item {
-                EmptyRow("no peers discovered yet")
+    }
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.material3.IconButton(onClick = back) {
+                `in`.yashd.bitchat.ui.relay.RelayIcon(R.drawable.relay_back, "Back to Chats")
             }
-        } else {
-            items(state.peers) { peer ->
-                PeerRow(
-                    peer = peer,
-                    selected = peer.identity.peerId == selectedPeerId,
-                    now = now,
-                    onClick = { onPeerClick(peer) }
-                )
+            Column(Modifier.weight(1f)) {
+                Text(name ?: "Nearby group", style = MaterialTheme.typography.titleMedium)
+                Text(if (peerId == null) "Nearby · public group" else "Nearby · private chat", style = MaterialTheme.typography.labelSmall)
             }
         }
+        if (peerId == null) Text("Everyone in range can read this group. Choose a person in Discover for a private chat.", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
+        ChatTab(state, messages, state.peers.associate { it.identity.peerId to it.identity.displayName }, now,
+            peerId, name, rememberLazyListState(), Modifier.weight(1f), openGroup,
+            onCopy = { copyToClipboard(context, "Relay message", it.body) },
+            onRetry = { message ->
+                if (`in`.yashd.bitchat.ui.relay.sendNearbySafely(message.body, message.recipientId,
+                    MeshRuntime.state.value.peers, MeshRuntime::sendMessage)) retriedIds.add(message.messageId)
+                else showError("This friend is no longer nearby. Your private message was not resent.")
+            })
+        androidx.compose.runtime.key(peerId) { MessageComposer(name, send) }
     }
 }
 
@@ -511,7 +357,7 @@ private fun ChatTab(
                             overflow = TextOverflow.Ellipsis
                         )
                         TextButton(onClick = onBackToPublic) {
-                            Text("public feed", style = MaterialTheme.typography.labelMedium)
+                            Text("Nearby group", style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }
@@ -524,7 +370,7 @@ private fun ChatTab(
         ) {
             if (rows.isEmpty()) {
                 Box(modifier = Modifier.padding(16.dp)) {
-                    EmptyRow("send a public message or select a peer for encrypted direct chat")
+                    EmptyRow(if (conversationKey == null) "Say hello to people nearby. Everyone in range can read this group." else "Say hello! Messages in this Nearby Chat are private.")
                 }
             } else {
                 LazyColumn(
@@ -597,143 +443,6 @@ private fun DateSeparator(label: String) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-    }
-}
-
-@Composable
-private fun SettingsTab(
-    state: MeshUiState,
-    modifier: Modifier = Modifier,
-    onRename: (String) -> Unit,
-    onRotate: () -> Unit,
-    onCopyId: () -> Unit,
-    onShareId: () -> Unit,
-    onRequestPermissions: () -> Unit,
-    onOpenBluetoothSettings: () -> Unit,
-    onStart: () -> Unit,
-    onStop: () -> Unit
-) {
-    val context = LocalContext.current
-    val version = remember {
-        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
-            .getOrNull() ?: "unknown"
-    }
-    LazyColumn(
-        modifier = modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-        contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        topItems(state)
-        item {
-            SectionLabel("Identity")
-        }
-        item {
-            IdentityPanel(
-                state = state,
-                onRename = onRename,
-                onRotate = onRotate,
-                onCopyId = onCopyId,
-                onShareId = onShareId
-            )
-        }
-        item {
-            SectionLabel("Connection")
-        }
-        item {
-            ReadinessPanel(
-                readiness = state.bluetoothReadiness,
-                serviceRunning = state.serviceRunning,
-                onRequestPermissions = onRequestPermissions,
-                onOpenBluetoothSettings = onOpenBluetoothSettings,
-                onStart = onStart,
-                onStop = onStop
-            )
-        }
-        item {
-            SectionLabel("About")
-        }
-        item {
-            AboutCard(version)
-        }
-    }
-}
-
-@Composable
-private fun MeshControlBar(
-    state: MeshUiState,
-    onRequestPermissions: () -> Unit,
-    onStart: () -> Unit,
-    onStop: () -> Unit
-) {
-    Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = "bitchat",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    text = if (state.serviceRunning) "mesh on / ${state.peers.size} nearby" else "mesh off",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (state.serviceRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (state.serviceRunning) {
-                Button(
-                    onClick = onStop,
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                ) {
-                    Text("stop", style = MaterialTheme.typography.labelMedium)
-                }
-            } else {
-                Button(
-                    onClick = if (state.bluetoothReadiness.hasPermissions) onStart else onRequestPermissions,
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text(
-                        if (state.bluetoothReadiness.hasPermissions) "start mesh" else "allow bluetooth",
-                        style = MaterialTheme.typography.labelMedium
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun Header(state: MeshUiState) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                text = "bitchat",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onBackground
-            )
-            Text(
-                text = "bluetooth-only mesh",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        StatusPill(
-            text = if (state.serviceRunning) "mesh on" else "mesh off",
-            color = if (state.serviceRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
-        )
     }
 }
 
@@ -820,7 +529,7 @@ private fun IdentityPanel(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "persistent signed identity",
+                        text = "Your Nearby identity",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.tertiary
                     )
@@ -834,7 +543,7 @@ private fun IdentityPanel(
                     onClick = onCopyId,
                     enabled = hasId,
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(18.dp)
                 ) {
                     Text("copy ID", style = MaterialTheme.typography.labelMedium)
                 }
@@ -842,7 +551,7 @@ private fun IdentityPanel(
                     onClick = onShareId,
                     enabled = hasId,
                     modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(18.dp)
                 ) {
                     Text("share ID", style = MaterialTheme.typography.labelMedium)
                 }
@@ -866,14 +575,14 @@ private fun IdentityPanel(
                         modifier = Modifier.weight(1f),
                         textStyle = MaterialTheme.typography.bodySmall,
                         singleLine = true,
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(18.dp)
                     )
                     Button(
                         onClick = {
                             onRename(draftName)
                             editing = false
                         },
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(18.dp)
                     ) {
                         Text("save", style = MaterialTheme.typography.labelMedium)
                     }
@@ -941,7 +650,7 @@ private fun ReadinessPanel(
                     onClick = if (readiness.hasPermissions) onStart else onRequestPermissions,
                     modifier = Modifier.weight(1f),
                     enabled = !serviceRunning,
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(18.dp)
                 ) {
                     Text(if (readiness.hasPermissions) "start mesh" else "allow bluetooth", style = MaterialTheme.typography.labelMedium)
                 }
@@ -949,8 +658,8 @@ private fun ReadinessPanel(
                     onClick = onStop,
                     modifier = Modifier.weight(1f),
                     enabled = serviceRunning,
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    shape = RoundedCornerShape(18.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer)
                 ) {
                     Text("stop", style = MaterialTheme.typography.labelMedium)
                 }
@@ -987,7 +696,7 @@ private fun ReadinessRow(
         if (ready) {
             StatusPill(text = "ready", color = MaterialTheme.colorScheme.primary)
         } else if (actionLabel != null && onAction != null) {
-            FilledTonalButton(onClick = onAction, shape = RoundedCornerShape(8.dp)) {
+            FilledTonalButton(onClick = onAction, shape = RoundedCornerShape(18.dp)) {
                 Text(actionLabel, style = MaterialTheme.typography.labelMedium)
             }
         } else {
@@ -1006,7 +715,7 @@ private fun AboutCard(version: String) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "bitchat",
+                    text = "Relay",
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurface
                 )
@@ -1035,101 +744,6 @@ private fun AboutCard(version: String) {
 }
 
 @Composable
-private fun PeerRow(peer: PeerState, selected: Boolean, now: Long, onClick: () -> Unit) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(8.dp),
-        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            PeerDot(peer.state == PeerConnectionState.Authenticated)
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(peer.identity.displayName, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(peer.rssi?.let { "$it dBm" } ?: "nearby", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        SignalBars(peer.rssi?.toInt())
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "${peer.state.name.lowercase()} / ${peer.identity.peerId}",
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = formatLastSeen(peer.identity.lastSeenMs, now),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SignalBars(rssi: Int?) {
-    val level = when {
-        rssi == null -> 0
-        rssi >= -60 -> 4
-        rssi >= -70 -> 3
-        rssi >= -80 -> 2
-        rssi >= -90 -> 1
-        else -> 0
-    }
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.Bottom
-    ) {
-        for (bar in 1..4) {
-            Box(
-                modifier = Modifier
-                    .width(3.dp)
-                    .height((3 + bar * 3).dp)
-                    .clip(RoundedCornerShape(1.dp))
-                    .background(
-                        if (bar <= level) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.outlineVariant
-                    )
-            )
-        }
-    }
-}
-
-private fun formatLastSeen(lastSeenMs: Long?, now: Long): String {
-    if (lastSeenMs == null) return "unknown"
-    val seconds = ((now - lastSeenMs) / 1000).coerceAtLeast(0)
-    return when {
-        seconds < 5 -> "just now"
-        seconds < 60 -> "${seconds}s ago"
-        seconds < 3600 -> "${seconds / 60}m ago"
-        seconds < 86_400 -> "${seconds / 3600}h ago"
-        else -> "${seconds / 86_400}d ago"
-    }
-}
-
-@Composable
 private fun FailedBadge(onClick: () -> Unit) {
     Box(
         modifier = Modifier
@@ -1154,7 +768,7 @@ private fun MessageBubble(row: ChatRow.Bubble, onCopy: () -> Unit, onRetry: () -
     val message = row.message
     val mine = message.direction == MessageDirection.Outbound
     val failed = message.status == MessageStatus.Failed
-    val shape = RoundedCornerShape(8.dp)
+    val shape = RoundedCornerShape(18.dp)
     val statusText = when (message.status) {
         MessageStatus.Pending -> "sending"
         MessageStatus.SentToTransport -> "sent"
@@ -1184,7 +798,7 @@ private fun MessageBubble(row: ChatRow.Bubble, onCopy: () -> Unit, onRetry: () -
                     onLongClick = onCopy
                 ),
             shape = shape,
-            color = if (mine) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
+            color = if (mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
         ) {
             Column(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -1204,7 +818,7 @@ private fun MessageBubble(row: ChatRow.Bubble, onCopy: () -> Unit, onRetry: () -
                     modifier = Modifier.fillMaxWidth(),
                     textAlign = TextAlign.End,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (failed) MaterialTheme.colorScheme.error else if (mine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
@@ -1212,7 +826,7 @@ private fun MessageBubble(row: ChatRow.Bubble, onCopy: () -> Unit, onRetry: () -
 }
 
 @Composable
-private fun MessageComposer(selectedPeerName: String?, onSend: (String) -> Unit) {
+private fun MessageComposer(selectedPeerName: String?, onSend: (String) -> Boolean) {
     var body by rememberSaveable { mutableStateOf("") }
 
     Surface(tonalElevation = 3.dp, color = MaterialTheme.colorScheme.surface) {
@@ -1224,7 +838,7 @@ private fun MessageComposer(selectedPeerName: String?, onSend: (String) -> Unit)
         ) {
             HorizontalDivider(thickness = DividerDefaults.Thickness, color = MaterialTheme.colorScheme.outlineVariant)
             Text(
-                text = selectedPeerName?.let { "encrypted direct to $it" } ?: "public nearby message",
+                text = selectedPeerName?.let { "Private Nearby Chat with $it" } ?: "Nearby group · everyone in range can read this",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1236,15 +850,14 @@ private fun MessageComposer(selectedPeerName: String?, onSend: (String) -> Unit)
                     textStyle = MaterialTheme.typography.bodySmall,
                     placeholder = { Text("message", style = MaterialTheme.typography.bodySmall) },
                     singleLine = true,
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(18.dp)
                 )
                 Button(
                     onClick = {
-                        onSend(body)
-                        body = ""
+                        if (onSend(body)) body = ""
                     },
                     enabled = body.isNotBlank(),
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(18.dp)
                 ) {
                     Text("send", style = MaterialTheme.typography.labelMedium)
                 }
@@ -1266,7 +879,7 @@ private fun ErrorPanel(errors: List<String>) {
 
 @Composable
 private fun EmptyRow(text: String) {
-    Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surface) {
+    Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface) {
         Text(
             text = text,
             modifier = Modifier.padding(12.dp),
@@ -1280,8 +893,8 @@ private fun EmptyRow(text: String) {
 private fun CompactCard(content: @Composable () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Box(modifier = Modifier.padding(12.dp)) {
@@ -1302,7 +915,7 @@ private fun SectionLabel(text: String) {
 
 @Composable
 private fun StatusPill(text: String, color: Color) {
-    Surface(shape = RoundedCornerShape(8.dp), color = color.copy(alpha = 0.12f)) {
+    Surface(shape = RoundedCornerShape(18.dp), color = color.copy(alpha = 0.12f)) {
         Text(
             text = text,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -1310,16 +923,6 @@ private fun StatusPill(text: String, color: Color) {
             color = color
         )
     }
-}
-
-@Composable
-private fun PeerDot(verified: Boolean) {
-    Box(
-        modifier = Modifier
-            .size(9.dp)
-            .clip(CircleShape)
-            .background(if (verified) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
-    )
 }
 
 private fun copyToClipboard(context: Context, label: String, text: String) {
@@ -1333,12 +936,4 @@ private fun runtimePermissions(): Array<String> {
         permissions += android.Manifest.permission.POST_NOTIFICATIONS
     }
     return permissions.toTypedArray()
-}
-
-@Preview(showBackground = true)
-@Composable
-private fun MeshChatPreview() {
-    BitchatTheme(dynamicColor = false) {
-        MeshChatApp()
-    }
 }

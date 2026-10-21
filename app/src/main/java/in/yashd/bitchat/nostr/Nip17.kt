@@ -4,7 +4,7 @@ import fr.acinq.secp256k1.Secp256k1
 import java.security.SecureRandom
 
 /** Only encrypted events leave createMessage; neither keys nor plaintext are retained here. */
-data class Nip17GiftWraps(val recipientCopy: NostrEvent, val senderCopy: NostrEvent)
+data class Nip17GiftWraps(val recipientCopy: NostrEvent, val senderCopy: NostrEvent, val rumorId: String)
 
 /**
  * Blocking one-to-one kind-14 text packaging; call on a worker thread.
@@ -29,7 +29,8 @@ class Nip17 {
         val json = NostrEventCodec.encodeRumor(rumor)
         return Nip17GiftWraps(
             wrap(json, senderSecret, recipientPublicKey, createdAtSeconds),
-            wrap(json, senderSecret, sender, createdAtSeconds)
+            wrap(json, senderSecret, sender, createdAtSeconds),
+            NostrEventCodec.calculateId(rumor)
         )
     }
 

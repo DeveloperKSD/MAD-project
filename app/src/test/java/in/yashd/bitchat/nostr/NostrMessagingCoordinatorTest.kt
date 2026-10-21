@@ -114,6 +114,24 @@ class NostrMessagingCoordinatorTest {
             assertNull(toBob.poll()); assertNull(toAlice.poll())
         }
     }
+    @Test fun storagePreparationFailureAbortsBeforeAnyPublication() = Network().use { n ->
+        val published = LinkedBlockingQueue<String>()
+        val inbox = n.relay { _, text -> if (fields(text)[0].jsonPrimitive.content == "EVENT") published.add(text) }
+        val discovery = n.relay { ws, text -> val f = fields(text)
+            if (f[0].jsonPrimitive.content == "REQ") {
+                val owner = f[2].jsonObject["authors"]!!.jsonArray[0].jsonPrimitive.content
+                val event = list(if (owner == pub(bob)) bob else alice, listOf(inbox))
+                ws.send("[\"EVENT\",${f[1]},${NostrEventCodec.encode(event)}]")
+                ws.send("[\"EOSE\",${f[1]}]")
+            }
+        }
+        NostrMessagingCoordinator(manager(), n.http, listOf(discovery)).use { c ->
+            assertThrows(ExecutionException::class.java) {
+                c.send(pub(bob), "not published", beforePublish = { throw IllegalStateException("local storage unavailable") }).get(15, TimeUnit.SECONDS)
+            }
+            assertNull(published.poll())
+        }
+    }
     @Test fun incomingDuplicateSuppressionAndReconnect(): Unit = Network().use { n ->
         val received = LinkedBlockingQueue<UnsignedNostrEvent>()
         val requests = LinkedBlockingQueue<String>()
