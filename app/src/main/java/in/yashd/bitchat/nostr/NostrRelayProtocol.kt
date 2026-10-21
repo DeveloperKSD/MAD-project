@@ -8,6 +8,7 @@ sealed interface RelayResponse {
     data class Acceptance(val eventId: String, val accepted: Boolean, val message: String) : RelayResponse
     data class EndOfStoredEvents(val subscriptionId: String) : RelayResponse
     data class Closed(val subscriptionId: String, val message: String) : RelayResponse
+    data class AuthenticationRequired(val challenge: String) : RelayResponse
     data class Notice(val message: String) : RelayResponse
 }
 
@@ -63,6 +64,7 @@ object NostrRelayProtocol {
             }
             "EOSE" -> { require(a.size == 2); val id = string(a[1]); validateSubscriptionId(id); RelayResponse.EndOfStoredEvents(id) }
             "CLOSED" -> { require(a.size == 3); val id = string(a[1]); validateSubscriptionId(id); RelayResponse.Closed(id, string(a[2])) }
+            "AUTH" -> { require(a.size == 2); RelayResponse.AuthenticationRequired(string(a[1])) }
             "NOTICE" -> { require(a.size == 2); RelayResponse.Notice(string(a[1])) }
             else -> null
         }

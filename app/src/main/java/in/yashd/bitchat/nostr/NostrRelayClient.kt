@@ -25,6 +25,9 @@ class NostrRelayClient(
     private val onInvalidMessage: () -> Unit = {}
 ) : Closeable {
     enum class State { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
+    // A WebSocket redirect would send inbox traffic to an unadvertised destination.
+    // The derived client shares the caller's dispatcher and pool; neither is shut down here.
+    private val transport = http.newBuilder().followRedirects(false).followSslRedirects(false).build()
     private val request: Request
     private val scheduler = Executors.newSingleThreadScheduledExecutor { task ->
         Thread(task, "nostr-relay-reconnect").apply { isDaemon = true }
@@ -58,7 +61,7 @@ class NostrRelayClient(
         val epoch = ++generation
         transition(State.CONNECTING)
         if (stopped || generation != epoch) return
-        socket = http.newWebSocket(request, object : WebSocketListener() {
+        socket = transport.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) = synchronized(this@NostrRelayClient) {
                 if (stopped || epoch != generation) { webSocket.cancel(); return@synchronized }
                 socket = webSocket

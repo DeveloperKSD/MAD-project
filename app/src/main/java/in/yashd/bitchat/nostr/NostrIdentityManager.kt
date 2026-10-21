@@ -38,6 +38,15 @@ class NostrIdentityManager internal constructor(private val storage: NostrIdenti
         }
     }
 
+    /** Internal scoped key access; never export or retain the storage buffer. */
+    internal fun <T> withSecret(action: (ByteArray) -> T): T = synchronized(lock) {
+        loadOrCreate()
+        val secret = try { requireNotNull(storage.read()) } catch (_: Exception) {
+            throw NostrIdentityException("Nostr identity could not be loaded")
+        }
+        try { action(secret) } finally { secret.fill(0) }
+    }
+
     private companion object {
         // Serialize creation across manager instances in the application process.
         val lock = Any()

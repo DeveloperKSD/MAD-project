@@ -74,6 +74,19 @@ class Nip17 {
         throw IllegalArgumentException("Invalid NIP-17 private message")
     }
 
+    /** Discover participants only inside authenticated layers, then reuse strict decoding. */
+    fun decodeIncoming(giftWrap: NostrEvent, recipientSecret: ByteArray): UnsignedNostrEvent = try {
+        val local = schnorr.publicKey(recipientSecret).lowercaseHex()
+        require(giftWrap.unsignedEvent.kind == 1059 && signer.verify(giftWrap))
+        require(singleRecipient(giftWrap.unsignedEvent) == local)
+        val seal = NostrEventCodec.decode(cipher.decrypt(giftWrap.unsignedEvent.content,
+            recipientSecret, giftWrap.unsignedEvent.pubkey.hexBytes()))
+        require(seal.unsignedEvent.kind == 13 && seal.unsignedEvent.tags.isEmpty() && signer.verify(seal))
+        val rumor = NostrEventCodec.decodeRumor(cipher.decrypt(seal.unsignedEvent.content,
+            recipientSecret, seal.unsignedEvent.pubkey.hexBytes()))
+        decodeMessage(giftWrap, recipientSecret, seal.unsignedEvent.pubkey, singleRecipient(rumor))
+    } catch (_: Exception) { throw IllegalArgumentException("Invalid NIP-17 private message") }
+
     private fun singleRecipient(event: UnsignedNostrEvent): String {
         val recipients = event.tags.filter { it.firstOrNull() == "p" }
         require(recipients.size == 1 && recipients.single().size >= 2) { "Expected one recipient" }

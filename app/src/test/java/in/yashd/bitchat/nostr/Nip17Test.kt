@@ -127,4 +127,25 @@ class Nip17Test {
         // NIP-59's generic kind-1 example is deliberately not an accepted NIP-17 text DM.
         rejects { nip17.decodeMessage(outer, receiver, rumor.pubkey, pub(receiver)) }
     }
+    @Test fun incomingEntryPointRejectsImpersonationAndInvalidLayersWithoutLeakingPlaintext() {
+        val originals = nip17.createMessage(alice, pub(bob), rumor().content, 1700000000)
+        assertEquals(rumor(), nip17.decodeIncoming(originals.recipientCopy, bob))
+        assertEquals(rumor(), nip17.decodeIncoming(originals.senderCopy, alice))
+        val validSeal = seal(NostrEventCodec.encodeRumor(rumor()))
+        val invalidEvents = listOf(
+            originals.recipientCopy.copy(sig = "00".repeat(64)),
+            wrap(validSeal.copy(sig = "00".repeat(64))),
+            wrap(seal(NostrEventCodec.encodeRumor(rumor().copy(pubkey = pub(eve))))),
+            wrap(seal(NostrEventCodec.encode(signer.sign(rumor(), alice)))),
+            wrap(seal(NostrEventCodec.encodeRumor(rumor().copy(tags = listOf(listOf("p", pub(eve))))))),
+            wrap(signer.sign(validSeal.unsignedEvent.copy(tags = listOf(listOf("p", pub(bob)))), alice))
+        )
+        invalidEvents.forEach {
+            val error = assertThrows(IllegalArgumentException::class.java) { nip17.decodeIncoming(it, bob) }
+            assertEquals("Invalid NIP-17 private message", error.message)
+            assertNull(error.cause)
+            assertFalse(error.toString().contains(rumor().content))
+        }
+    }
+
 }

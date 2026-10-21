@@ -49,4 +49,18 @@ class NostrIdentityManagerTest {
         assertThrows(NostrIdentityException::class.java) { NostrIdentityManager(storage).loadOrCreate() }
         assertArrayEquals(ByteArray(32), captured)
     }
+    @Test fun scopedSecretIsClearedOnSuccessAndFailure() {
+        val storage = MemoryStorage()
+        val manager = NostrIdentityManager(storage)
+        var captured: ByteArray? = null
+        val publicKey = manager.withSecret { captured = it; SchnorrSignature().publicKey(it).lowercaseHex() }
+        assertEquals(manager.loadOrCreate().publicKeyHex, publicKey)
+        assertArrayEquals(ByteArray(32), captured)
+        assertThrows(IllegalStateException::class.java) {
+            manager.withSecret { captured = it; error("Consumer failure") }
+        }
+        assertArrayEquals(ByteArray(32), captured)
+        assertEquals(1, storage.writes)
+    }
+
 }
