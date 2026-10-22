@@ -147,10 +147,8 @@ private fun RelayMeshHost(model: `in`.yashd.bitchat.ui.relay.RelayViewModel) {
         runCatching { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
             .onFailure { model.error("Couldn’t open Bluetooth settings.") }
     }
-    `in`.yashd.bitchat.ui.relay.RelayApp(model, state, start, stop, request, bluetoothSettings,
-        nearbyChat = { peerId, back, openGroup ->
-            NearbyConversationScreen(state, peerId, back, openGroup, model::error)
-        },
+    // New Figma UI (RelayHome.kt). The previous screens in ui/relay are left as they were.
+    RelayHome(model, state, start, stop, request, bluetoothSettings,
         nearbySettings = {
             item { SectionLabel("Nearby identity") }
             item { IdentityPanel(state,
