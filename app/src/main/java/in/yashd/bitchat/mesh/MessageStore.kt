@@ -4,12 +4,17 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
+import `in`.yashd.bitchat.data.internet.HistoryCipher
+import `in`.yashd.bitchat.identity.decode64
+import `in`.yashd.bitchat.identity.encode64
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
-class MessageStore(context: Context) {
+class MessageStore(context: Context, private val cipher: HistoryCipher = HistoryCipher("relay.nearby.messages.aes.v1")) {
     private val prefs = context.applicationContext.getSharedPreferences("messages", Context.MODE_PRIVATE)
     private val messages = LinkedHashMap<String, ChatMessage>()
+    var storageError: Boolean = false
+        private set
     private val _conversation = MutableStateFlow<List<ChatMessage>>(emptyList())
     val conversation: StateFlow<List<ChatMessage>> = _conversation
 
@@ -60,16 +65,19 @@ class MessageStore(context: Context) {
         }
     }
 
-    fun markPacketDelivered(packetIdHex: String) {
-        messages.values.firstOrNull { it.packetIdHex == packetIdHex }?.let {
+    fun markPacketDelivered(packetIdHex: String, senderId: String) {
+        messages.values.firstOrNull { it.packetIdHex == packetIdHex && it.direction == MessageDirection.Outbound &&
+            (it.recipientId == senderId || it.recipientId == null) }?.let {
             updateStatus(it.messageId, packetIdHex, MessageStatus.Delivered)
         }
     }
 
     private fun put(message: ChatMessage) {
+        check(!storageError) { "Nearby history is unavailable; existing data preserved" }
         messages[message.messageId] = message
+        while (messages.size > 200) messages.remove(messages.keys.first())
+        try { save() } catch (e: Exception) { storageError = true; throw e }
         publish()
-        save()
     }
 
     private fun publish() {
@@ -93,13 +101,18 @@ class MessageStore(context: Context) {
                     .put("direction", message.direction.name)
             )
         }
-        prefs.edit().putString("items", array.toString()).apply()
+        if (!cipher.exists()) cipher.create()
+        val encrypted = cipher.encrypt(array.toString(), "nearby-messages-v1").encode64()
+        check(prefs.edit().putString("items.enc", encrypted).remove("items").commit())
     }
 
     private fun load() {
-        val raw = prefs.getString("items", null) ?: return
-        runCatching {
+        try {
+            val encrypted = prefs.getString("items.enc", null)
+            val raw = if (encrypted != null) cipher.decrypt(encrypted.decode64(), "nearby-messages-v1")
+                else prefs.getString("items", null) ?: return
             val array = JSONArray(raw)
+            val loaded = LinkedHashMap<String, ChatMessage>()
             for (index in 0 until array.length()) {
                 val item = array.getJSONObject(index)
                 val message = ChatMessage(
@@ -114,9 +127,16 @@ class MessageStore(context: Context) {
                     status = MessageStatus.valueOf(item.getString("status")),
                     direction = MessageDirection.valueOf(item.getString("direction"))
                 )
-                messages[message.messageId] = message
+                loaded[message.messageId] = message
             }
+            val interrupted = loaded.values.any { it.status == MessageStatus.Pending }
+            loaded.replaceAll { _, message -> if (message.status == MessageStatus.Pending) message.copy(status = MessageStatus.Failed) else message }
+            messages.putAll(loaded.entries.toList().takeLast(200).associate { it.toPair() })
+            if (encrypted == null || interrupted) save()
             publish()
+        } catch (_: Exception) {
+            messages.clear()
+            storageError = true
         }
     }
 }

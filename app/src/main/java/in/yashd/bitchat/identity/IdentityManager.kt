@@ -2,6 +2,7 @@ package `in`.yashd.bitchat.identity
 
 import android.content.Context
 import android.util.Base64
+import `in`.yashd.bitchat.data.internet.HistoryCipher
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -14,8 +15,10 @@ import java.security.spec.ECGenParameterSpec
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 
-class IdentityManager(context: Context) {
+class IdentityManager(context: Context, private val cipher: HistoryCipher = HistoryCipher("relay.nearby.identity.aes.v1")) {
     private val prefs = context.applicationContext.getSharedPreferences("identity", Context.MODE_PRIVATE)
+    var migratedFromPeerId: String? = null
+        private set
 
     fun loadOrCreate(displayNameProvider: () -> String): LocalIdentity {
         val storedPeerId = prefs.getString(KEY_PEER_ID, null)
@@ -27,27 +30,38 @@ class IdentityManager(context: Context) {
         val createdAtMs = prefs.getLong(KEY_CREATED_AT, 0L)
 
         if (storedPeerId != null && name != null && encPub != null && encPriv != null && signPub != null && signPriv != null) {
+            val encryptionPrivate = readSecret(encPriv, KEY_ENC_PRIVATE)
+            val signingPrivate = readSecret(signPriv, KEY_SIGN_PRIVATE)
+            val peerId = derivePeerId(encPub.decode64(), signPub.decode64())
+            if (peerId != storedPeerId || !encPriv.startsWith("encrypted:") || !signPriv.startsWith("encrypted:")) {
+                check(prefs.edit().putString(KEY_PEER_ID, peerId)
+                    .putString(KEY_ENC_PRIVATE, protect(encryptionPrivate, KEY_ENC_PRIVATE))
+                    .putString(KEY_SIGN_PRIVATE, protect(signingPrivate, KEY_SIGN_PRIVATE)).commit())
+                if (peerId != storedPeerId) migratedFromPeerId = storedPeerId
+            }
             return LocalIdentity(
-                peerId = storedPeerId,
+                peerId = peerId,
                 displayName = name,
                 encryptionPublicKey = encPub.decode64(),
-                encryptionPrivateKey = encPriv.decode64(),
+                encryptionPrivateKey = encryptionPrivate,
                 signingPublicKey = signPub.decode64(),
-                signingPrivateKey = signPriv.decode64(),
+                signingPrivateKey = signingPrivate,
                 createdAtMs = createdAtMs
             )
         }
 
+        check(prefs.all.keys.none { it != KEY_DISPLAY_NAME }) { "Nearby identity is incomplete; existing data preserved" }
         return create(trimDisplayName(displayNameProvider()))
     }
 
     fun updateDisplayName(name: String): LocalIdentity {
-        prefs.edit().putString(KEY_DISPLAY_NAME, trimDisplayName(name)).apply()
-        return loadOrCreate { name }
+        val identity = loadOrCreate { name }
+        val displayName = trimDisplayName(name)
+        check(prefs.edit().putString(KEY_DISPLAY_NAME, displayName).commit())
+        return identity.copy(displayName = displayName)
     }
 
     fun rotateIdentity(displayName: String): LocalIdentity {
-        clearIdentity()
         return create(trimDisplayName(displayName))
     }
 
@@ -59,16 +73,18 @@ class IdentityManager(context: Context) {
         val encryption = generateEcKeyPair()
         val signing = generateEcKeyPair()
         val createdAtMs = System.currentTimeMillis()
-        val peerId = derivePeerId(encryption.public.encoded)
-        prefs.edit()
+        val peerId = derivePeerId(encryption.public.encoded, signing.public.encoded)
+        val encPrivate = protect(encryption.private.encoded, KEY_ENC_PRIVATE)
+        val signPrivate = protect(signing.private.encoded, KEY_SIGN_PRIVATE)
+        check(prefs.edit()
             .putString(KEY_PEER_ID, peerId)
             .putString(KEY_DISPLAY_NAME, displayName)
             .putString(KEY_ENC_PUBLIC, encryption.public.encoded.encode64())
-            .putString(KEY_ENC_PRIVATE, encryption.private.encoded.encode64())
+            .putString(KEY_ENC_PRIVATE, encPrivate)
             .putString(KEY_SIGN_PUBLIC, signing.public.encoded.encode64())
-            .putString(KEY_SIGN_PRIVATE, signing.private.encoded.encode64())
+            .putString(KEY_SIGN_PRIVATE, signPrivate)
             .putLong(KEY_CREATED_AT, createdAtMs)
-            .apply()
+            .commit())
         return LocalIdentity(
             peerId = peerId,
             displayName = displayName,
@@ -86,6 +102,15 @@ class IdentityManager(context: Context) {
         return generator.generateKeyPair()
     }
 
+    private fun readSecret(value: String, binding: String): ByteArray =
+        if (value.startsWith("encrypted:")) cipher.decrypt(value.removePrefix("encrypted:").decode64(), binding).decode64()
+        else value.decode64().also { decodePrivateKey(it) }
+
+    private fun protect(secret: ByteArray, binding: String): String {
+        if (!cipher.exists()) cipher.create()
+        return "encrypted:" + cipher.encrypt(secret.encode64(), binding).encode64()
+    }
+
     companion object {
         private const val KEY_PEER_ID = "peer_id"
         private const val KEY_DISPLAY_NAME = "display_name"
@@ -100,8 +125,10 @@ class IdentityManager(context: Context) {
             return trimmed.takeIf { it.isNotBlank() }?.take(32) ?: "nearby"
         }
 
-        fun derivePeerId(publicKey: ByteArray): String {
-            val hash = MessageDigest.getInstance("SHA-256").digest(publicKey)
+        fun derivePeerId(encryptionPublicKey: ByteArray, signingPublicKey: ByteArray): String {
+            decodePublicKey(encryptionPublicKey)
+            decodePublicKey(signingPublicKey)
+            val hash = MessageDigest.getInstance("SHA-256").digest(encryptionPublicKey + signingPublicKey)
             return hash.take(8).joinToString("") { "%02x".format(it) }
         }
 

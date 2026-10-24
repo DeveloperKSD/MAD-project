@@ -39,7 +39,7 @@ class MeshForegroundService : Service() {
 
     private fun notification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.mipmap.ic_launcher)
-        .setContentTitle("bitchat mesh running")
+        .setContentTitle("Relay Nearby is on")
         .setContentText("Scanning, advertising, and keeping nearby links alive.")
         .setOngoing(true)
         .setContentIntent(
@@ -67,7 +67,7 @@ class MeshForegroundService : Service() {
         val manager = getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "bitchat mesh",
+            "Relay Nearby",
             NotificationManager.IMPORTANCE_LOW
         )
         manager.createNotificationChannel(channel)

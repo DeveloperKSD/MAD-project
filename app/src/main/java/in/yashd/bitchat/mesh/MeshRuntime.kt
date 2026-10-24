@@ -7,6 +7,7 @@ import `in`.yashd.bitchat.bluetooth.TransportPacket
 import `in`.yashd.bitchat.identity.IdentityManager
 import `in`.yashd.bitchat.identity.LocalIdentity
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -17,7 +18,8 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 object MeshRuntime {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate +
+        CoroutineExceptionHandler { _, _ -> addError("Nearby operation failed; existing data was preserved. Retry after checking Bluetooth and local storage.") })
     private val seenPackets = LinkedHashMap<String, Long>()
     private val cryptoBox = CryptoBox()
 
@@ -34,13 +36,14 @@ object MeshRuntime {
     private val _state = MutableStateFlow(MeshUiState())
     val state: StateFlow<MeshUiState> = _state
 
-    fun initialize(context: Context) {
-        if (::appContext.isInitialized) return
+    fun initialize(context: Context) = scope.launch {
+        if (::appContext.isInitialized) return@launch
         appContext = context.applicationContext
         identityManager = IdentityManager(appContext)
         readinessChecker = BluetoothReadinessChecker(appContext)
         peerManager = PeerManager()
         messageStore = MessageStore(appContext)
+        if (messageStore.storageError) addError("Nearby history is unavailable; existing data was preserved.")
         scope.launch {
             peerManager.peers.collect { publishState() }
         }
@@ -48,29 +51,34 @@ object MeshRuntime {
             messageStore.conversation.collect { publishState() }
         }
         refreshReadiness()
-        loadIdentity("nearby")
+        runCatching { loadIdentity("nearby") }.onFailure { addError("Nearby identity is unavailable; existing data was preserved.") }
+        if (identityManager.migratedFromPeerId != null) addError("Nearby upgraded to protocol 2. Your Nearby ID changed; exchange new IDs with your friends. History and keys were preserved.")
     }
 
-    fun refreshReadiness() {
-        if (!::readinessChecker.isInitialized) return
+    fun refreshReadiness() = scope.launch {
+        if (!::readinessChecker.isInitialized) return@launch
         publishState(readiness = readinessChecker.check())
     }
 
-    fun start(displayName: String = "nearby") {
-        if (!::appContext.isInitialized) return
-        val identity = loadIdentity(displayName)
+    fun start(displayName: String = "nearby") = scope.launch {
+        if (!::appContext.isInitialized) return@launch
+        runCatching { loadIdentity(displayName) }.getOrElse {
+            addError("Nearby identity is unavailable; existing data was preserved.")
+            return@launch
+        }
         refreshReadiness()
         val readiness = _state.value.bluetoothReadiness
         if (!readiness.ready) {
             addError("bluetooth is not ready")
-            return
+            return@launch
         }
-        if (transport != null) return
+        if (transport != null) return@launch
         transport = BleTransport(
             context = appContext,
-            onPacket = ::processTransportPacket,
-            onLinkReady = ::sendAnnouncement,
-            onError = ::addError
+            onPacket = { packet -> scope.launch { processTransportPacket(packet) } },
+            onLinkReady = { scope.launch { sendAnnouncement() } },
+            onError = ::addError,
+            onLinkLost = { peerManager.linkLost(it) }
         ).also { it.start() }
         publishState(serviceRunning = true)
         sendAnnouncement()
@@ -78,39 +86,54 @@ object MeshRuntime {
         announceJob = scope.launch {
             while (true) {
                 delay(30_000)
+                peerManager.expire()
                 sendAnnouncement()
             }
         }
     }
 
-    fun stop() {
+    fun stop() = scope.launch {
         announceJob?.cancel()
         announceJob = null
         transport?.stop()
         transport = null
+        if (::peerManager.isInitialized) peerManager.disconnectAll()
         publishState(serviceRunning = false)
     }
 
-    fun renameSelf(name: String) {
-        localIdentity = identityManager.updateDisplayName(name)
+    fun renameSelf(name: String) = scope.launch {
+        localIdentity = runCatching { identityManager.updateDisplayName(name) }.getOrElse {
+            addError("Nearby identity could not be updated; existing data was preserved."); return@launch
+        }
         publishState()
         if (_state.value.serviceRunning) sendAnnouncement()
     }
 
-    fun rotateIdentity() {
+    fun rotateIdentity() = scope.launch {
         val currentName = localIdentity?.displayName ?: "nearby"
         stop()
-        localIdentity = identityManager.rotateIdentity(currentName)
+        localIdentity = runCatching { identityManager.rotateIdentity(currentName) }.getOrElse {
+            addError("Nearby identity could not be rotated; existing data was preserved."); return@launch
+        }
         publishState()
     }
 
-    fun sendMessage(text: String, peerId: String?) {
+    fun sendMessage(text: String, peerId: String?) = scope.launch {
         val body = text.trim()
-        if (body.isBlank()) return
-        val identity = localIdentity ?: return
+        if (body.isBlank()) return@launch
+        if (body.length > PacketCodec.MAX_PAYLOAD_BYTES || body.encodeToByteArray().size > PacketCodec.MAX_PAYLOAD_BYTES) {
+            addError("Nearby message is too large (maximum payload: 4096 UTF-8 bytes including message metadata).")
+            return@launch
+        }
+        val identity = localIdentity ?: return@launch
         val peer = peerId?.let { peerManager.get(it) }
+        if (peerId != null && peer == null) {
+            addError("Unknown Nearby recipient; message was not sent.")
+            return@launch
+        }
         val privateMessage = peer != null
-        val message = messageStore.createOutbound(identity.peerId, peerId, body, privateMessage)
+        val message = runCatching { messageStore.createOutbound(identity.peerId, peerId, body, privateMessage) }
+            .getOrElse { addError("Nearby history is unavailable; existing data was preserved."); return@launch }
         val payload = JSONObject()
             .put("messageId", message.messageId)
             .put("createdAtMs", message.createdAtMs)
@@ -128,19 +151,26 @@ object MeshRuntime {
             }.getOrElse {
                 messageStore.updateStatus(message.messageId, null, MessageStatus.Failed)
                 addError("encryption failed")
-                return
+                return@launch
             }
         } else {
             payload
         }
-        val packet = PacketCodec.createSigned(type, identity.peerId, peerId, finalPayload, identity.signingPrivateKey)
-        val packetBytes = PacketCodec.encode(packet)
-        val accepted = transport?.send(packetBytes) == true
+        val packet = runCatching {
+            PacketCodec.createSigned(type, identity.peerId, peerId, finalPayload, identity.signingPrivateKey)
+        }.getOrElse {
+            messageStore.updateStatus(message.messageId, null, MessageStatus.Failed)
+            addError("Nearby message could not be encoded (maximum payload: 4096 bytes).")
+            return@launch
+        }
+        val accepted = runCatching { transport?.send(PacketCodec.encode(packet)) == true }
+            .onFailure { addError("Nearby send failed.") }.getOrDefault(false)
         messageStore.updateStatus(
             message.messageId,
             packet.packetId.toHex(),
-            if (accepted) MessageStatus.SentToTransport else MessageStatus.Pending
+            if (accepted) MessageStatus.SentToTransport else MessageStatus.Failed
         )
+        if (!accepted) addError("No Nearby link accepted the message. Turn on Nearby and retry.")
     }
 
     private fun loadIdentity(displayName: String): LocalIdentity {
@@ -169,7 +199,15 @@ object MeshRuntime {
             .onFailure { addError("malformed packet dropped") }
             .getOrNull() ?: return
         if (decoded.senderId == localPeerId) return
-        if (kotlin.math.abs(System.currentTimeMillis() - decoded.timestampMs) > 10 * 60_000) return
+        val now = System.currentTimeMillis()
+        if (decoded.timestampMs !in (now - 10 * 60_000)..(now + 10 * 60_000)) return
+        val announcedIdentity = if (decoded.type == PacketType.ANNOUNCE) {
+            runCatching { AnnouncementCodec.decode(decoded) }.getOrNull() ?: return
+        } else {
+            val sender = peerManager.get(decoded.senderId) ?: return
+            if (!PacketCodec.verify(decoded, sender.identity.signingPublicKey)) return
+            null
+        }
         val packetIdHex = decoded.packetId.toHex()
         if (rememberSeen(packetIdHex)) return
         if (decoded.recipientId != null && decoded.recipientId != localPeerId) {
@@ -177,7 +215,7 @@ object MeshRuntime {
             return
         }
         when (decoded.type) {
-            PacketType.ANNOUNCE -> handleAnnouncement(decoded, packet)
+            PacketType.ANNOUNCE -> peerManager.upsertAnnouncement(announcedIdentity!!, packet.linkId, null, decoded.ttl == 5)
             PacketType.MESSAGE -> handleMessage(decoded, encrypted = false)
             PacketType.ENCRYPTED -> handleMessage(decoded, encrypted = true)
             PacketType.ACK -> handleAck(decoded)
@@ -187,22 +225,10 @@ object MeshRuntime {
         if (decoded.recipientId == null) relay(decoded)
     }
 
-    private fun handleAnnouncement(decoded: MeshPacket, packet: TransportPacket) {
-        val identity = runCatching { AnnouncementCodec.decode(decoded) }
-            .onFailure { addError("invalid announcement dropped") }
-            .getOrNull() ?: return
-        peerManager.upsertAnnouncement(identity, packet.linkId, null)
-        sendAnnouncement()
-    }
-
     private fun handleMessage(decoded: MeshPacket, encrypted: Boolean) {
         val local = localIdentity ?: return
         if (decoded.recipientId != null && decoded.recipientId != local.peerId) return
         val sender = peerManager.get(decoded.senderId)
-        if (sender != null && !PacketCodec.verify(decoded, sender.identity.signingPublicKey)) {
-            addError("invalid message signature")
-            return
-        }
         val payload = if (encrypted) {
             val peer = sender ?: return addError("encrypted message from unknown peer")
             runCatching {
@@ -215,19 +241,21 @@ object MeshRuntime {
             decoded.payload
         }
         val json = runCatching { JSONObject(payload.decodeToString()) }.getOrNull() ?: return
-        messageStore.addInbound(
+        runCatching { messageStore.addInbound(
             packetIdHex = decoded.packetId.toHex(),
             senderId = decoded.senderId,
             recipientId = decoded.recipientId,
             body = json.optString("body"),
             isPrivate = encrypted
-        )
+        ) }.getOrElse { addError("Nearby history is unavailable; existing data was preserved."); return }
         sendAck(decoded.senderId, decoded.packetId.toHex())
     }
 
     private fun handleAck(decoded: MeshPacket) {
         val json = runCatching { JSONObject(decoded.payload.decodeToString()) }.getOrNull() ?: return
-        messageStore.markPacketDelivered(json.optString("ackedPacketId"))
+        if (decoded.recipientId != localIdentity?.peerId) return
+        runCatching { messageStore.markPacketDelivered(json.optString("ackedPacketId"), decoded.senderId) }
+            .onFailure { addError("Nearby history is unavailable; existing data was preserved.") }
     }
 
     private fun sendAck(recipientId: String, packetIdHex: String) {

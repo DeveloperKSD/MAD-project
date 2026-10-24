@@ -20,6 +20,8 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.ParcelUuid
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.ContextCompat
 import java.util.LinkedList
 import java.util.concurrent.atomic.AtomicInteger
@@ -35,37 +37,49 @@ class BleTransport(
     private val context: Context,
     private val onPacket: (TransportPacket) -> Unit,
     private val onLinkReady: () -> Unit,
-    private val onError: (String) -> Unit
+    private val onError: (String) -> Unit,
+    private val onLinkLost: (String) -> Unit = {}
 ) {
     private val bluetoothManager = context.getSystemService(BluetoothManager::class.java)
     private val adapter = bluetoothManager?.adapter
-    private val advertiser = adapter?.bluetoothLeAdvertiser
-    private val scanner = adapter?.bluetoothLeScanner
+    private val advertiser get() = adapter?.bluetoothLeAdvertiser
+    private val scanner get() = adapter?.bluetoothLeScanner
+    private val handler = Handler(Looper.getMainLooper())
+    private var running = false
     private val connectedGatts = linkedMapOf<String, BluetoothGatt>()
     private val readyClients = mutableSetOf<String>()
     private val subscribedServerClients = linkedMapOf<String, BluetoothDevice>()
     private val negotiatedMtus = mutableMapOf<String, Int>()
+    private val serverMtus = mutableMapOf<String, Int>()
     private val writeQueue = LinkedList<Pair<String, ByteArray>>()
     private val notificationQueue = LinkedList<Pair<BluetoothDevice, ByteArray>>()
     private val nextMessageId = AtomicInteger()
     private val reassembler = BleFrameCodec.Reassembler()
-    private var activeWrite = false
-    private var activeNotification = false
+    private val write = PendingBleOperation<BluetoothGatt>(
+        { handler.postDelayed(it, OPERATION_TIMEOUT_MS) }, handler::removeCallbacks
+    ) { gatt -> onError("BLE write timed out"); dropClient(gatt) }
+    private val notification = PendingBleOperation<BluetoothDevice>(
+        { handler.postDelayed(it, OPERATION_TIMEOUT_MS) }, handler::removeCallbacks
+    ) { device ->
+        onError("BLE notification timed out")
+        runCatching { gattServer?.cancelConnection(device) }
+        dropServerClient(device)
+    }
     private var gattServer: BluetoothGattServer? = null
     private var packetCharacteristic: BluetoothGattCharacteristic? = null
 
     private val advertiseCallback = object : AdvertiseCallback() {
-        override fun onStartFailure(errorCode: Int) {
+        override fun onStartFailure(errorCode: Int) = onMain {
             onError("advertise failed: $errorCode")
         }
     }
 
     private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
+        override fun onScanResult(callbackType: Int, result: ScanResult) = onMain {
             val serviceUuids = result.scanRecord?.serviceUuids.orEmpty()
-            if (ParcelUuid(BleUuids.SERVICE_UUID) !in serviceUuids) return
-            val address = result.device.address ?: return
-            if (!connectedGatts.containsKey(address)) {
+            if (ParcelUuid(BleUuids.SERVICE_UUID) !in serviceUuids) return@onMain
+            val address = result.device.address ?: return@onMain
+            if (!connectedGatts.containsKey(address) && connectedGatts.size < 16) {
                 runCatching {
                     result.device.connectGatt(context, false, clientCallback, BluetoothDevice.TRANSPORT_LE)
                 }.onSuccess { gatt ->
@@ -76,41 +90,41 @@ class BleTransport(
             }
         }
 
-        override fun onScanFailed(errorCode: Int) {
+        override fun onScanFailed(errorCode: Int) = onMain {
             onError("scan failed: $errorCode")
         }
     }
 
     private val clientCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) = onMain {
+            if (connectedGatts[gatt.device.address] !== gatt) return@onMain
             if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                 connectedGatts[gatt.device.address] = gatt
                 if (!gatt.requestMtu(512)) gatt.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
-                connectedGatts.remove(gatt.device.address)
-                readyClients.remove(gatt.device.address)
-                negotiatedMtus.remove(gatt.device.address)
-                gatt.close()
+                dropClient(gatt)
             }
         }
 
-        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) = onMain {
+            if (connectedGatts[gatt.device.address] !== gatt) return@onMain
             if (status == BluetoothGatt.GATT_SUCCESS) negotiatedMtus[gatt.device.address] = mtu
             gatt.discoverServices()
         }
 
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) = onMain {
+            if (connectedGatts[gatt.device.address] !== gatt) return@onMain
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 onError("service discovery failed: $status")
                 gatt.disconnect()
-                return
+                return@onMain
             }
             val characteristic = gatt.getService(BleUuids.SERVICE_UUID)
                 ?.getCharacteristic(BleUuids.PACKET_CHARACTERISTIC_UUID)
             if (characteristic == null) {
                 onError("packet characteristic missing")
                 gatt.disconnect()
-                return
+                return@onMain
             }
             gatt.setCharacteristicNotification(characteristic, true)
             val descriptor = characteristic.getDescriptor(BleUuids.CLIENT_CONFIG_UUID)
@@ -125,8 +139,8 @@ class BleTransport(
             }
         }
 
-        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            if (descriptor.uuid != BleUuids.CLIENT_CONFIG_UUID) return
+        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) = onMain {
+            if (connectedGatts[gatt.device.address] !== gatt || descriptor.uuid != BleUuids.CLIENT_CONFIG_UUID) return@onMain
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 markClientReady(gatt)
             } else {
@@ -137,8 +151,11 @@ class BleTransport(
 
         @Deprecated("Deprecated in platform API")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            if (characteristic.uuid == BleUuids.PACKET_CHARACTERISTIC_UUID) {
-                receiveFrame(characteristic.value, gatt.device.address)
+            val value = characteristic.value?.copyOf() ?: return
+            onMain {
+                if (connectedGatts[gatt.device.address] === gatt && characteristic.uuid == BleUuids.PACKET_CHARACTERISTIC_UUID) {
+                    receiveFrame(value, gatt.device.address)
+                }
             }
         }
 
@@ -146,26 +163,25 @@ class BleTransport(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
             status: Int
-        ) {
+        ) = onMain {
+            if (!write.finish(gatt)) return@onMain
             if (status != BluetoothGatt.GATT_SUCCESS) onError("write failed: $status")
-            activeWrite = false
             drainWrites()
         }
     }
 
     private val serverCallback = object : BluetoothGattServerCallback() {
-        override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+        override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) = onMain {
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                subscribedServerClients.remove(device.address)
-                negotiatedMtus.remove(device.address)
+                dropServerClient(device)
             }
         }
 
-        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
-            negotiatedMtus[device.address] = mtu
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) = onMain {
+            serverMtus[device.address] = mtu
         }
 
-        override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+        override fun onServiceAdded(status: Int, service: BluetoothGattService) = onMain {
             if (status == BluetoothGatt.GATT_SUCCESS) startAdvertising()
             else onError("GATT service registration failed: $status")
         }
@@ -178,8 +194,9 @@ class BleTransport(
             responseNeeded: Boolean,
             offset: Int,
             value: ByteArray
-        ) {
+        ) = onMain {
             val valid = descriptor.uuid == BleUuids.CLIENT_CONFIG_UUID &&
+                !preparedWrite && offset == 0 &&
                 value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
             if (valid) subscribedServerClients[device.address] = device
             val status = if (valid) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
@@ -195,32 +212,40 @@ class BleTransport(
             responseNeeded: Boolean,
             offset: Int,
             value: ByteArray
-        ) {
-            if (characteristic.uuid == BleUuids.PACKET_CHARACTERISTIC_UUID) {
+        ) = onMain {
+            val valid = characteristic.uuid == BleUuids.PACKET_CHARACTERISTIC_UUID && !preparedWrite && offset == 0
+            if (valid) {
                 receiveFrame(value, device.address)
             }
             if (responseNeeded) {
-                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
+                gattServer?.sendResponse(device, requestId, if (valid) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE, offset, null)
             }
         }
 
-        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) = onMain {
+            if (!notification.finish(device)) return@onMain
             if (status != BluetoothGatt.GATT_SUCCESS) onError("notification failed: $status")
-            activeNotification = false
             drainNotifications()
         }
     }
 
     fun start() {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (running) return
         if (!hasRequiredPermissions()) {
             onError("bluetooth permissions missing")
             return
         }
+        running = true
         startGattServer()
         startScanning()
     }
 
     fun stop() {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        running = false
+        write.clear()
+        notification.clear()
         runCatching { scanner?.stopScan(scanCallback) }
         runCatching { advertiser?.stopAdvertising(advertiseCallback) }
         connectedGatts.values.forEach { runCatching { it.close() } }
@@ -228,26 +253,31 @@ class BleTransport(
         readyClients.clear()
         subscribedServerClients.clear()
         negotiatedMtus.clear()
+        serverMtus.clear()
         runCatching { gattServer?.close() }
         gattServer = null
         packetCharacteristic = null
         writeQueue.clear()
         notificationQueue.clear()
         reassembler.clear()
-        activeWrite = false
-        activeNotification = false
     }
 
     fun send(bytes: ByteArray): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (!running) return false
         var queued = false
         readyClients.forEach { address ->
-            BleFrameCodec.encode(bytes, valueSize(address), nextMessageId.incrementAndGet()).forEach {
+            val frames = BleFrameCodec.encode(bytes, valueSize(address), nextMessageId.incrementAndGet())
+            if (writeQueue.size + frames.size > MAX_QUEUED_FRAMES) return@forEach
+            frames.forEach {
                 writeQueue.add(address to it)
             }
             queued = true
         }
         subscribedServerClients.values.forEach { device ->
-            BleFrameCodec.encode(bytes, valueSize(device.address), nextMessageId.incrementAndGet()).forEach {
+            val frames = BleFrameCodec.encode(bytes, (serverMtus[device.address] ?: 23) - 3, nextMessageId.incrementAndGet())
+            if (notificationQueue.size + frames.size > MAX_QUEUED_FRAMES) return@forEach
+            frames.forEach {
                 notificationQueue.add(device to it)
             }
             queued = true
@@ -305,31 +335,75 @@ class BleTransport(
     }
 
     private fun drainWrites() {
-        if (activeWrite) return
-        val (address, bytes) = writeQueue.poll() ?: return
-        val gatt = connectedGatts[address] ?: return drainWrites()
-        val characteristic = gatt.getService(BleUuids.SERVICE_UUID)
-            ?.getCharacteristic(BleUuids.PACKET_CHARACTERISTIC_UUID)
-            ?: return drainWrites()
-        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        characteristic.value = bytes
-        activeWrite = gatt.writeCharacteristic(characteristic)
-        if (!activeWrite) {
+        if (write.owner != null) return
+        while (writeQueue.isNotEmpty()) {
+            val (address, bytes) = writeQueue.removeFirst()
+            val gatt = connectedGatts[address] ?: continue
+            val characteristic = gatt.getService(BleUuids.SERVICE_UUID)
+                ?.getCharacteristic(BleUuids.PACKET_CHARACTERISTIC_UUID) ?: continue
+            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            characteristic.value = bytes
+            if (runCatching { gatt.writeCharacteristic(characteristic) }.getOrDefault(false)) {
+                write.start(gatt)
+                return
+            }
             onError("write could not start")
-            drainWrites()
+            dropClient(gatt)
+            return
         }
     }
 
     private fun drainNotifications() {
-        if (activeNotification) return
-        val (device, bytes) = notificationQueue.poll() ?: return
-        val server = gattServer ?: return
-        val characteristic = packetCharacteristic ?: return
-        characteristic.value = bytes
-        activeNotification = server.notifyCharacteristicChanged(device, characteristic, false)
-        if (!activeNotification) {
+        if (notification.owner != null) return
+        while (notificationQueue.isNotEmpty()) {
+            val (device, bytes) = notificationQueue.removeFirst()
+            if (device.address !in subscribedServerClients) continue
+            val server = gattServer ?: return
+            val characteristic = packetCharacteristic ?: return
+            characteristic.value = bytes
+            if (runCatching { server.notifyCharacteristicChanged(device, characteristic, false) }.getOrDefault(false)) {
+                notification.start(device)
+                return
+            }
             onError("notification could not start")
-            drainNotifications()
+            runCatching { server.cancelConnection(device) }
+            dropServerClient(device)
+            return
+        }
+    }
+
+    private fun dropClient(gatt: BluetoothGatt) {
+        val address = gatt.device.address
+        connectedGatts.remove(address)
+        readyClients.remove(address)
+        negotiatedMtus.remove(address)
+        writeQueue.removeAll { it.first == address }
+        write.finish(gatt)
+        runCatching { gatt.disconnect(); gatt.close() }
+        linkLost(address)
+        drainWrites()
+    }
+
+    private fun dropServerClient(device: BluetoothDevice) {
+        val address = device.address
+        subscribedServerClients.remove(address)
+        serverMtus.remove(address)
+        notificationQueue.removeAll { it.first.address == address }
+        notification.finish(device)
+        linkLost(address)
+        drainNotifications()
+    }
+
+    private fun linkLost(address: String) {
+        if (address !in readyClients && address !in subscribedServerClients) {
+            reassembler.clear(address)
+            onLinkLost(address)
+        }
+    }
+
+    private fun onMain(action: () -> Unit) {
+        handler.post {
+            if (running) runCatching(action).onFailure { onError("BLE operation failed; check Bluetooth permissions and retry.") }
         }
     }
 
@@ -350,5 +424,10 @@ class BleTransport(
         return BluetoothReadinessChecker.requiredPermissions().all {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         }
+    }
+
+    private companion object {
+        const val OPERATION_TIMEOUT_MS = 15_000L
+        const val MAX_QUEUED_FRAMES = 4096
     }
 }
