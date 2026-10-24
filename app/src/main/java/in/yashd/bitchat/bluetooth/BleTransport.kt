@@ -22,6 +22,7 @@ import android.content.pm.PackageManager
 import android.os.ParcelUuid
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.core.content.ContextCompat
 import java.util.LinkedList
 import java.util.concurrent.atomic.AtomicInteger
@@ -57,11 +58,11 @@ class BleTransport(
     private val reassembler = BleFrameCodec.Reassembler()
     private val write = PendingBleOperation<BluetoothGatt>(
         { handler.postDelayed(it, OPERATION_TIMEOUT_MS) }, handler::removeCallbacks
-    ) { gatt -> onError("BLE write timed out"); dropClient(gatt) }
+    ) { gatt -> Log.d("RelayBluetooth", "BLE write timed out"); dropClient(gatt) }
     private val notification = PendingBleOperation<BluetoothDevice>(
         { handler.postDelayed(it, OPERATION_TIMEOUT_MS) }, handler::removeCallbacks
     ) { device ->
-        onError("BLE notification timed out")
+        Log.d("RelayBluetooth", "BLE notification timed out")
         runCatching { gattServer?.cancelConnection(device) }
         dropServerClient(device)
     }
@@ -70,7 +71,8 @@ class BleTransport(
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartFailure(errorCode: Int) = onMain {
-            onError("advertise failed: $errorCode")
+            Log.d("RelayBluetooth", "Advertising failed: $errorCode")
+            onError("Nearby couldn't start. Restart Bluetooth and try again.")
         }
     }
 
@@ -85,13 +87,14 @@ class BleTransport(
                 }.onSuccess { gatt ->
                     connectedGatts[address] = gatt
                 }.onFailure {
-                    onError("connect failed: ${it.message ?: "unknown"}")
+                    Log.d("RelayBluetooth", "BLE connection attempt failed")
                 }
             }
         }
 
         override fun onScanFailed(errorCode: Int) = onMain {
-            onError("scan failed: $errorCode")
+            Log.d("RelayBluetooth", "Scan failed: $errorCode")
+            onError("Couldn't search for nearby people. Restart Bluetooth and try again.")
         }
     }
 
@@ -115,14 +118,14 @@ class BleTransport(
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) = onMain {
             if (connectedGatts[gatt.device.address] !== gatt) return@onMain
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                onError("service discovery failed: $status")
+                Log.d("RelayBluetooth", "Service discovery failed: $status")
                 gatt.disconnect()
                 return@onMain
             }
             val characteristic = gatt.getService(BleUuids.SERVICE_UUID)
                 ?.getCharacteristic(BleUuids.PACKET_CHARACTERISTIC_UUID)
             if (characteristic == null) {
-                onError("packet characteristic missing")
+                Log.d("RelayBluetooth", "Packet characteristic missing")
                 gatt.disconnect()
                 return@onMain
             }
@@ -131,7 +134,7 @@ class BleTransport(
             if (descriptor != null) {
                 descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                 if (!gatt.writeDescriptor(descriptor)) {
-                    onError("notification setup failed")
+                    Log.d("RelayBluetooth", "Notification setup failed")
                     gatt.disconnect()
                 }
             } else {
@@ -144,7 +147,7 @@ class BleTransport(
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 markClientReady(gatt)
             } else {
-                onError("notification setup failed: $status")
+                Log.d("RelayBluetooth", "Notification setup failed: $status")
                 gatt.disconnect()
             }
         }
@@ -165,7 +168,7 @@ class BleTransport(
             status: Int
         ) = onMain {
             if (!write.finish(gatt)) return@onMain
-            if (status != BluetoothGatt.GATT_SUCCESS) onError("write failed: $status")
+            if (status != BluetoothGatt.GATT_SUCCESS) Log.d("RelayBluetooth", "Write failed: $status")
             drainWrites()
         }
     }
@@ -183,7 +186,10 @@ class BleTransport(
 
         override fun onServiceAdded(status: Int, service: BluetoothGattService) = onMain {
             if (status == BluetoothGatt.GATT_SUCCESS) startAdvertising()
-            else onError("GATT service registration failed: $status")
+            else {
+                Log.d("RelayBluetooth", "GATT service registration failed: $status")
+                onError("Nearby couldn't start. Restart Bluetooth and try again.")
+            }
         }
 
         override fun onDescriptorWriteRequest(
@@ -224,7 +230,7 @@ class BleTransport(
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) = onMain {
             if (!notification.finish(device)) return@onMain
-            if (status != BluetoothGatt.GATT_SUCCESS) onError("notification failed: $status")
+            if (status != BluetoothGatt.GATT_SUCCESS) Log.d("RelayBluetooth", "Notification failed: $status")
             drainNotifications()
         }
     }
@@ -233,7 +239,7 @@ class BleTransport(
         check(Looper.myLooper() == Looper.getMainLooper())
         if (running) return
         if (!hasRequiredPermissions()) {
-            onError("bluetooth permissions missing")
+            onError("Allow Bluetooth permissions to use Nearby.")
             return
         }
         running = true
@@ -307,7 +313,7 @@ class BleTransport(
         packetCharacteristic = characteristic
         val server = bluetoothManager?.openGattServer(context, serverCallback)
         if (server == null || !server.addService(service)) {
-            onError("GATT server unavailable")
+            onError("Nearby isn't available right now. Restart Bluetooth and try again.")
             server?.close()
             return
         }
@@ -347,7 +353,7 @@ class BleTransport(
                 write.start(gatt)
                 return
             }
-            onError("write could not start")
+            Log.d("RelayBluetooth", "Write could not start")
             dropClient(gatt)
             return
         }
@@ -365,7 +371,7 @@ class BleTransport(
                 notification.start(device)
                 return
             }
-            onError("notification could not start")
+            Log.d("RelayBluetooth", "Notification could not start")
             runCatching { server.cancelConnection(device) }
             dropServerClient(device)
             return
@@ -413,7 +419,7 @@ class BleTransport(
 
     private fun receiveFrame(bytes: ByteArray, linkId: String) {
         runCatching { reassembler.accept(linkId, bytes) }
-            .onFailure { onError("malformed BLE frame dropped") }
+            .onFailure { Log.d("RelayBluetooth", "Ignoring invalid BLE frame") }
             .getOrNull()
             ?.let { onPacket(TransportPacket(it, linkId, null)) }
     }

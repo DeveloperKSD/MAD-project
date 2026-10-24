@@ -1,6 +1,7 @@
 package `in`.yashd.bitchat.mesh
 
 import android.content.Context
+import android.util.Log
 import `in`.yashd.bitchat.bluetooth.BleTransport
 import `in`.yashd.bitchat.bluetooth.BluetoothReadinessChecker
 import `in`.yashd.bitchat.bluetooth.TransportPacket
@@ -52,7 +53,7 @@ object MeshRuntime {
         }
         refreshReadiness()
         runCatching { loadIdentity("nearby") }.onFailure { addError("Nearby identity is unavailable; existing data was preserved.") }
-        if (identityManager.migratedFromPeerId != null) addError("Nearby upgraded to protocol 2. Your Nearby ID changed; exchange new IDs with your friends. History and keys were preserved.")
+        if (identityManager.migratedFromPeerId != null) addError("Your Nearby ID has changed. Share your new ID with your friends.")
     }
 
     fun refreshReadiness() = scope.launch {
@@ -69,7 +70,7 @@ object MeshRuntime {
         refreshReadiness()
         val readiness = _state.value.bluetoothReadiness
         if (!readiness.ready) {
-            addError("bluetooth is not ready")
+            addError("Turn on Bluetooth and allow Nearby permissions to connect.")
             return@launch
         }
         if (transport != null) return@launch
@@ -122,7 +123,7 @@ object MeshRuntime {
         val body = text.trim()
         if (body.isBlank()) return@launch
         if (body.length > PacketCodec.MAX_PAYLOAD_BYTES || body.encodeToByteArray().size > PacketCodec.MAX_PAYLOAD_BYTES) {
-            addError("Nearby message is too large (maximum payload: 4096 UTF-8 bytes including message metadata).")
+            addError("Message is too long. Try a shorter message.")
             return@launch
         }
         val identity = localIdentity ?: return@launch
@@ -150,7 +151,7 @@ object MeshRuntime {
                 )
             }.getOrElse {
                 messageStore.updateStatus(message.messageId, null, MessageStatus.Failed)
-                addError("encryption failed")
+                addError("Couldn't send this private message. Reconnect and try again.")
                 return@launch
             }
         } else {
@@ -160,7 +161,7 @@ object MeshRuntime {
             PacketCodec.createSigned(type, identity.peerId, peerId, finalPayload, identity.signingPrivateKey)
         }.getOrElse {
             messageStore.updateStatus(message.messageId, null, MessageStatus.Failed)
-            addError("Nearby message could not be encoded (maximum payload: 4096 bytes).")
+            addError("Couldn't send this message. Try a shorter message or reconnect.")
             return@launch
         }
         val accepted = runCatching { transport?.send(PacketCodec.encode(packet)) == true }
@@ -196,7 +197,7 @@ object MeshRuntime {
     private fun processTransportPacket(packet: TransportPacket) {
         val localPeerId = localIdentity?.peerId ?: return
         val decoded = runCatching { PacketCodec.decode(packet.bytes) }
-            .onFailure { addError("malformed packet dropped") }
+            .onFailure { Log.d("RelayMesh", "Ignoring invalid Nearby packet") }
             .getOrNull() ?: return
         if (decoded.senderId == localPeerId) return
         val now = System.currentTimeMillis()
@@ -230,11 +231,11 @@ object MeshRuntime {
         if (decoded.recipientId != null && decoded.recipientId != local.peerId) return
         val sender = peerManager.get(decoded.senderId)
         val payload = if (encrypted) {
-            val peer = sender ?: return addError("encrypted message from unknown peer")
+            val peer = sender ?: return
             runCatching {
                 cryptoBox.decrypt(local.encryptionPrivateKey, peer.identity.encryptionPublicKey, decoded.payload)
             }.getOrElse {
-                addError("decryption failed")
+                Log.d("RelayMesh", "Ignoring unreadable Nearby message")
                 return
             }
         } else {

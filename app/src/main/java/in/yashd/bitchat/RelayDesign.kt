@@ -30,12 +30,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import `in`.yashd.bitchat.ui.avatar.FacehashAvatar
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -45,7 +48,7 @@ import kotlin.math.roundToInt
 
 /*
  * Shared look for the Relay screens, taken from the Figma design:
- * near-black background, rounded dark cards, blue accents and coloured initial avatars.
+ * near-black background, rounded dark cards, blue accents and animated face avatars.
  * UI only: nothing in this file talks to Bluetooth, Nostr or storage.
  */
 
@@ -140,23 +143,13 @@ internal fun avatarColor(name: String): Color {
     }
 }
 
-internal fun initialOf(name: String): String =
-    name.trim().firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "?"
-
-/** Round coloured avatar with the person's first letter, like the Figma rows. */
+/** Shared round, animated face avatar for profiles, people and conversations. */
 @Composable
-internal fun PersonAvatar(name: String, size: Dp, color: Color = avatarColor(name), modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier.size(size).clip(CircleShape).background(color),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = initialOf(name),
-            color = Color.White,
-            fontSize = (size.value * 0.42f).sp,
-            fontWeight = FontWeight.SemiBold
-        )
-    }
+internal fun PersonAvatar(name: String, size: Dp, modifier: Modifier = Modifier) {
+    FacehashAvatar(
+        name = name,
+        modifier = modifier.size(size).clip(CircleShape),
+    )
 }
 
 /** Big title on the left ("Relay" / "Settings") and your own avatar on the right. */
@@ -176,8 +169,9 @@ internal fun RelayHeader(title: String, myName: String, onAvatar: () -> Unit) {
         PersonAvatar(
             name = myName.ifBlank { "Me" },
             size = 34.dp,
-            color = RelayColors.Me,
-            modifier = Modifier.clip(CircleShape).clickable(onClick = onAvatar)
+            modifier = Modifier.clip(CircleShape)
+                .semantics { contentDescription = "Your profile" }
+                .clickable(onClickLabel = "Open settings", onClick = onAvatar)
         )
     }
 }

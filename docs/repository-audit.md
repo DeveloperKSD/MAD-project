@@ -209,6 +209,12 @@ Checked means implemented and checked with the available JVM/build verification.
 - `git diff --check` passed. No commit or push was made.
 - Per user request, no emulator will be started or used. Phone/Keystore/UI/radio verification remains with the user.
 
+### Follow-up: quieter user-facing messages
+- Moved invalid packet/frame, unreadable incoming message, transient BLE connection/write/notification, and relay catch-up diagnostics to debug logging instead of UI error banners.
+- Kept actionable permission, startup, failed-send, and storage errors. Simplified the Bluetooth, message-size, and identity-upgrade wording; removed the permanent protocol explanation from the identity card.
+- Packet validation, signature checks, reassembly, and disconnect recovery still run normally. Debug messages contain no packet or message contents.
+- Verification: `./gradlew testDebugUnitTest assembleDebug && git diff --check` passed. No emulator or phone tests were run.
+
 ## Phone verification handoff
 
 App APK: `app/build/outputs/apk/debug/app-debug.apk`.

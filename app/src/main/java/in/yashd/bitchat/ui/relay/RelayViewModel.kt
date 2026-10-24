@@ -1,6 +1,7 @@
 package `in`.yashd.bitchat.ui.relay
 
 import androidx.lifecycle.ViewModel
+import android.util.Log
 import `in`.yashd.bitchat.data.internet.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -33,13 +34,16 @@ class AndroidInternetBackend(private val identity: NostrIdentityManager) : Inter
             onRelayIssue = { url, error ->
                 if (error in listOf(NostrMessagingCoordinator.Issue.AUTHENTICATION_REQUIRED, NostrMessagingCoordinator.Issue.SUBSCRIPTION_CLOSED))
                     connection(url, "subscription unavailable")
-                issue(when (error) {
+                val message = when (error) {
                     NostrMessagingCoordinator.Issue.AUTHENTICATION_REQUIRED -> "This server requires a login Relay does not support yet. Choose another server."
                     NostrMessagingCoordinator.Issue.SUBSCRIPTION_CLOSED -> "A server closed your inbox subscription. Retry or choose another inbox server."
                     NostrMessagingCoordinator.Issue.CONNECTION_ERROR -> "A server connection failed. Check your Internet connection and server addresses, then retry."
-                    NostrMessagingCoordinator.Issue.RECEIVE_QUEUE_FULL -> "Incoming messages are catching up. Keep Relay open."
-                    else -> "A server sent unsupported data. If this continues, choose another server."
-                })
+                    NostrMessagingCoordinator.Issue.INVALID_MESSAGE, NostrMessagingCoordinator.Issue.RECEIVE_QUEUE_FULL -> {
+                        Log.d("RelayInternet", "Relay diagnostic: $error")
+                        null
+                    }
+                }
+                if (message != null) issue(message)
             },
             onInboxState = { url, state -> connection(url, state.name.lowercase()) })
         return object : InternetSession {

@@ -83,7 +83,7 @@ internal fun RelaySettingsPage(
                         .padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    PersonAvatar(myName.ifBlank { "Me" }, 54.dp, RelayColors.Me)
+                    PersonAvatar(myName.ifBlank { "Me" }, 54.dp)
                     Spacer(Modifier.width(14.dp))
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
