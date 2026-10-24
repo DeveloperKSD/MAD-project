@@ -2,6 +2,8 @@
 <data-extraction-rules>
     <!-- noBackupFilesDir is excluded automatically from both mechanisms. -->
     <cloud-backup>
+        <exclude domain="sharedpref" path="identity.xml" />
+        <exclude domain="sharedpref" path="messages.xml" />
         <exclude domain="file" path="nostr_identity.enc" />
         <exclude domain="file" path="nostr_identity.enc.bak" />
         <exclude domain="file" path="relay_history/" />
@@ -11,6 +13,8 @@
         <exclude domain="database" path="relay-internet.db-journal" />
     </cloud-backup>
     <device-transfer>
+        <exclude domain="sharedpref" path="identity.xml" />
+        <exclude domain="sharedpref" path="messages.xml" />
         <exclude domain="file" path="nostr_identity.enc" />
         <exclude domain="file" path="nostr_identity.enc.bak" />
         <exclude domain="file" path="relay_history/" />

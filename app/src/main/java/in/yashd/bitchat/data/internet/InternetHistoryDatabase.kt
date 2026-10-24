@@ -20,6 +20,7 @@ data class PublicationRow(val owner: String, val recordId: String, val target: S
     val eventId: String, val encryptedRelay: ByteArray, val stage: String)
 @Entity(tableName = "storage_metadata")
 data class StorageMetadata(@PrimaryKey val id: Int = 1, val keyCheck: ByteArray)
+data class ConversationTime(val peer: String, val lastMessageAtMs: Long)
 
 @Dao
 interface HistoryDao {
@@ -33,12 +34,18 @@ interface HistoryDao {
     @Query("SELECT * FROM publications WHERE owner = :owner") suspend fun allPublications(owner: String): List<PublicationRow>
     @Query("SELECT * FROM conversations WHERE owner = :owner AND peer = :peer") suspend fun conversation(owner: String, peer: String): ConversationRow?
     @Query("SELECT * FROM messages WHERE owner = :owner ORDER BY createdAtMs, recordId") suspend fun messages(owner: String): List<MessageRow>
+    @Query("SELECT * FROM messages WHERE owner = :owner ORDER BY createdAtMs DESC, recordId DESC LIMIT 200") suspend fun recent(owner: String): List<MessageRow>
+    @Query("SELECT peer, MAX(createdAtMs) AS lastMessageAtMs FROM messages WHERE owner = :owner GROUP BY peer") suspend fun conversationTimes(owner: String): List<ConversationTime>
+    @Query("SELECT * FROM messages WHERE owner = :owner AND status = 'QUEUED'") suspend fun pending(owner: String): List<MessageRow>
+    @Query("SELECT * FROM messages WHERE owner = :owner AND peer = :peer AND (:beforeTime IS NULL OR createdAtMs < :beforeTime OR (createdAtMs = :beforeTime AND recordId < :beforeId)) ORDER BY createdAtMs DESC, recordId DESC LIMIT 100")
+    suspend fun page(owner: String, peer: String, beforeTime: Long?, beforeId: String): List<MessageRow>
     @Query("SELECT * FROM messages WHERE owner = :owner AND recordId = :id") suspend fun message(owner: String, id: String): MessageRow?
     @Query("SELECT * FROM messages WHERE owner = :owner AND rumorId = :rumor") suspend fun rumor(owner: String, rumor: String): MessageRow?
     @Insert(onConflict = OnConflictStrategy.ABORT) suspend fun insert(value: MessageRow)
     @Update suspend fun update(value: MessageRow)
     @Delete suspend fun delete(value: MessageRow)
     @Query("SELECT * FROM publications WHERE owner = :owner AND recordId = :id ORDER BY target, position") suspend fun publications(owner: String, id: String): List<PublicationRow>
+    @Query("SELECT * FROM publications WHERE owner = :owner AND recordId IN (:ids)") suspend fun publicationsForMessages(owner: String, ids: List<String>): List<PublicationRow>
     @Insert suspend fun insert(values: List<PublicationRow>)
 }
 @Database(entities = [ContactRow::class, ConversationRow::class, MessageRow::class, PublicationRow::class, StorageMetadata::class], version = 1, exportSchema = true)

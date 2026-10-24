@@ -298,7 +298,8 @@ private fun peerOrder(state: PeerConnectionState): Int = when (state) {
 private fun PeerRow(peer: PeerState, onClick: () -> Unit) {
     val name = peer.identity.displayName.ifBlank { peer.identity.peerId.take(8) }
     val (stateText, dot) = when (peer.state) {
-        PeerConnectionState.Authenticated, PeerConnectionState.Connected -> "Direct connection" to RelayColors.Green
+        PeerConnectionState.Authenticated, PeerConnectionState.Connected ->
+            (if (peer.directDeviceAddress != null) "Nearby link" else "Mesh route") to RelayColors.Green
         PeerConnectionState.Connecting -> "Connecting…" to RelayColors.Orange
         PeerConnectionState.Discovered -> "Found nearby" to RelayColors.Orange
         PeerConnectionState.Failed -> "Connection failed" to RelayColors.Red

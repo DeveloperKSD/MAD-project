@@ -52,18 +52,42 @@ class RoomInternetHistoryRepository(
         validateKey(owner)
         db.withTransaction {
             dao.conversations(owner).forEach { check(it.transport == "INTERNET") }
-            dao.allPublications(owner).forEach {
-                check(it.target in listOf("recipient", "sender"))
-                NostrMessagingCoordinator.Stage.valueOf(it.stage)
-                cipher.decrypt(it.encryptedRelay, publicationBinding(it))
-            }
+            val rows = dao.recent(owner).asReversed()
+            val times = dao.conversationTimes(owner).associate { it.peer to it.lastMessageAtMs }
+            validatePublications(dao.publicationsForMessages(owner, rows.map { it.recordId }))
             HistorySnapshot(dao.contacts(owner).map {
-                SavedContact(it.peer, cipher.decrypt(it.encryptedName, nameBinding(owner, it.peer)))
-            }, dao.messages(owner).map {
-                check(it.transport == "INTERNET")
-                SavedMessage(it.recordId, it.rumorId, it.peer, body(it), it.outgoing, it.createdAtMs, HistoryStatus.valueOf(it.status))
-            })
+                SavedContact(it.peer, cipher.decrypt(it.encryptedName, nameBinding(owner, it.peer)), times[it.peer])
+            }, rows.map(::saved))
         }
+    }
+    override suspend fun changes(owner: String, id: String?, peer: String?): HistorySnapshot = access { db, dao ->
+        validateKey(owner)
+        db.withTransaction {
+            val row = id?.let { dao.message(owner, it) ?: dao.rumor(owner, it) }
+            if (row != null) validatePublications(dao.publications(owner, row.recordId))
+            val contact = (peer ?: row?.peer)?.let { dao.contact(owner, it) }
+            HistorySnapshot(contact?.let { listOf(SavedContact(it.peer, cipher.decrypt(it.encryptedName, nameBinding(owner, it.peer)), row?.createdAtMs)) }.orEmpty(),
+                row?.let { listOf(saved(it)) }.orEmpty())
+        }
+    }
+    override suspend fun page(owner: String, peer: String, beforeTime: Long?, beforeId: String): List<SavedMessage> = access { db, dao ->
+        validateKey(owner); validateKey(peer)
+        db.withTransaction {
+            val rows = dao.page(owner, peer, beforeTime, beforeId).asReversed()
+            validatePublications(dao.publicationsForMessages(owner, rows.map { it.recordId }))
+            rows.map(::saved)
+        }
+    }
+    private fun validatePublications(rows: List<PublicationRow>) {
+        rows.forEach {
+            check(it.target in listOf("recipient", "sender"))
+            NostrMessagingCoordinator.Stage.valueOf(it.stage)
+            cipher.decrypt(it.encryptedRelay, publicationBinding(it))
+        }
+    }
+    private fun saved(row: MessageRow): SavedMessage {
+        check(row.transport == "INTERNET")
+        return SavedMessage(row.recordId, row.rumorId, row.peer, body(row), row.outgoing, row.createdAtMs, HistoryStatus.valueOf(row.status))
     }
     private suspend fun ensureConversation(dao: HistoryDao, owner: String, peer: String, name: String, now: Long) {
         validateKey(owner); validateKey(peer)
@@ -152,8 +176,8 @@ class RoomInternetHistoryRepository(
     override suspend fun interruptPending(owner: String) = access { db, dao ->
         db.withTransaction {
             // Verify all bodies first, so a failure does not mutate damaged history.
-            val verified = dao.messages(owner).map { it to body(it) }
-            verified.filter { it.first.status == HistoryStatus.QUEUED.name }.forEach { (row, content) ->
+            val verified = dao.pending(owner).map { it to body(it) }
+            verified.forEach { (row, content) ->
                 dao.update(seal(row.copy(status = HistoryStatus.UNKNOWN.name), content))
             }
         }

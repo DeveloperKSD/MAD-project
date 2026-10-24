@@ -369,6 +369,69 @@ class RelayViewModelTest {
             assertEquals(`in`.yashd.bitchat.data.internet.HistoryStatus.UNKNOWN, backing.load("01".repeat(32)).messages.single().status)
         } finally { release.complete(Unit); models.clear() }
     }
+
+    @Test fun mutationsUseDeltasAndThreadHistoryUsesBoundedPages() = kotlinx.coroutines.runBlocking {
+        val backing = `in`.yashd.bitchat.data.internet.TestHistoryRepository()
+        val owner = "01".repeat(32)
+        val peer = "02".repeat(32)
+        repeat(250) { backing.outgoing(owner, "row-${it.toString().padStart(3, '0')}", peer, "body-$it", it.toLong()) }
+        var loads = 0
+        var changes = 0
+        val history = object : `in`.yashd.bitchat.data.internet.InternetHistoryRepository by backing {
+            override suspend fun load(owner: String): `in`.yashd.bitchat.data.internet.HistorySnapshot { loads++; return backing.load(owner) }
+            override suspend fun changes(owner: String, id: String?, peer: String?): `in`.yashd.bitchat.data.internet.HistorySnapshot {
+                changes++; return backing.changes(owner, id, peer)
+            }
+        }
+        val model = RelayViewModel(Backend(), Dispatchers.Unconfined, history)
+        val models = ViewModelStore().apply { put("relay", model) }
+        try {
+            val initialLoads = loads
+            model.addInternetConversation(npub, "Name")
+            assertEquals(initialLoads, loads)
+            assertEquals(1, changes)
+            val peerNpub = NostrNpub.encode(ByteArray(32) { 2 })
+            model.loadConversation(peerNpub)
+            assertEquals(100, model.state.value.thread.size)
+            assertEquals("body-150", model.state.value.thread.first().body)
+            model.loadConversation(peerNpub, older = true)
+            assertEquals(100, model.state.value.thread.size)
+            assertEquals("body-50", model.state.value.thread.first().body)
+            assertFalse(model.state.value.threadLatest)
+            model.loadConversation(peerNpub, older = true)
+            assertEquals(50, model.state.value.thread.size)
+            assertFalse(model.state.value.threadHasOlder)
+            model.loadConversation(peerNpub)
+            assertTrue(model.state.value.threadLatest)
+            model.loadConversation(peerNpub, older = true)
+            configured(model)
+            model.send(peerNpub, "New message from an older page")
+            assertTrue(model.state.value.threadLatest)
+            assertEquals("New message from an older page", model.state.value.thread.last().body)
+        } finally { models.clear() }
+    }
+    @Test fun switchingChatsNeverShowsThePreviousPeersMessagesWhileLoading() = kotlinx.coroutines.runBlocking {
+        val backing = `in`.yashd.bitchat.data.internet.TestHistoryRepository()
+        backing.received("01".repeat(32), "aa".repeat(32), "02".repeat(32), "Only for peer two", false, 1)
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val history = object : `in`.yashd.bitchat.data.internet.InternetHistoryRepository by backing {
+            override suspend fun page(owner: String, peer: String, beforeTime: Long?, beforeId: String): List<`in`.yashd.bitchat.data.internet.SavedMessage> {
+                if (peer == "03".repeat(32)) release.await()
+                return backing.page(owner, peer, beforeTime, beforeId)
+            }
+        }
+        val model = RelayViewModel(Backend(), Dispatchers.Unconfined, history)
+        val models = ViewModelStore().apply { put("relay", model) }
+        try {
+            model.loadConversation(NostrNpub.encode(ByteArray(32) { 2 }))
+            assertEquals("Only for peer two", model.state.value.thread.single().body)
+            model.loadConversation(NostrNpub.encode(ByteArray(32) { 3 }))
+            assertTrue(model.state.value.threadLoading)
+            assertTrue(model.state.value.thread.isEmpty())
+            release.complete(Unit)
+        } finally { release.complete(Unit); models.clear() }
+        Unit
+    }
     companion object {
         private fun publication(stage: NostrMessagingCoordinator.Stage) = NostrMessagingCoordinator.Publication("id", "wss://relay.example", stage)
     }

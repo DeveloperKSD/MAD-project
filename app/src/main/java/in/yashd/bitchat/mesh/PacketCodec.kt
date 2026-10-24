@@ -6,10 +6,10 @@ import java.nio.ByteOrder
 import java.security.SecureRandom
 
 object PacketCodec {
-    private const val VERSION = 1
+    private const val VERSION = 2
     private const val FLAG_HAS_RECIPIENT = 0x01
     private const val FLAG_HAS_SIGNATURE = 0x02
-    private const val MAX_PAYLOAD_BYTES = 4096
+    const val MAX_PAYLOAD_BYTES = 4096
     private val random = SecureRandom()
 
     fun createSigned(
@@ -38,6 +38,9 @@ object PacketCodec {
     }
 
     fun encode(packet: MeshPacket): ByteArray {
+        require(packet.version == VERSION && packet.ttl in 0..5 && packet.packetId.size == 16)
+        require(packet.senderId.hexToBytes().size == 8 && (packet.recipientId == null || packet.recipientId.hexToBytes().size == 8))
+        require(packet.payload.size <= MAX_PAYLOAD_BYTES && (packet.signature?.size ?: 0) <= 80)
         val recipientBytes = packet.recipientId?.hexToBytes()
         val signature = packet.signature
         val size = 1 + 1 + 1 + 1 + 8 + 16 + 8 +
@@ -61,9 +64,12 @@ object PacketCodec {
     fun decode(bytes: ByteArray): MeshPacket {
         val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
         val version = buffer.get().toInt() and 0xff
+        require(version == VERSION)
         val type = PacketType.fromValue(buffer.get().toInt() and 0xff) ?: error("unknown packet type")
         val ttl = buffer.get().toInt() and 0xff
+        require(ttl in 0..5)
         val flags = buffer.get().toInt() and 0xff
+        require(flags and (FLAG_HAS_RECIPIENT or FLAG_HAS_SIGNATURE).inv() == 0)
         val timestampMs = buffer.long
         val packetId = ByteArray(16).also(buffer::get)
         val sender = ByteArray(8).also(buffer::get).toHex()
@@ -76,7 +82,9 @@ object PacketCodec {
         require(payloadLength in 0..MAX_PAYLOAD_BYTES)
         val payload = ByteArray(payloadLength).also(buffer::get)
         val signatureLength = buffer.short.toInt() and 0xffff
+        require(signatureLength <= 80 && (signatureLength > 0) == (flags and FLAG_HAS_SIGNATURE != 0))
         val signature = if (signatureLength > 0) ByteArray(signatureLength).also(buffer::get) else null
+        require(!buffer.hasRemaining())
         return MeshPacket(version, type, ttl, flags, timestampMs, packetId, sender, recipient, payload, signature)
     }
 

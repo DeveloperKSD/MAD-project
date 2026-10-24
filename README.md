@@ -11,12 +11,19 @@ Users explicitly choose Nearby or Internet conversations. **Relay does not autom
 
 ## Features
 
+### Nearby protocol 2 upgrade
+
+Nearby peer IDs now bind **both** public keys. On upgrade, existing key pairs and message history are preserved, but the local Nearby ID is recomputed. Upgrade every phone participating in the mesh and compare/share the new Nearby IDs again. Protocol 1 packets are rejected; historical conversations using old remote IDs are retained and are not silently retargeted to new IDs. Nostr identities are unchanged by this migration.
+
+Nearby private keys and message history now migrate to Keystore-backed encrypted preferences. Both preference files are excluded from new backups and device transfers. A missing key or damaged history blocks writes instead of replacing existing data.
+
 ### Nearby — BLE mesh
 
 - BLE scanning, advertising, and GATT connections for peer discovery and packet exchange.
 - Public broadcasts and AES-GCM encrypted one-to-one messages using the BLE identity and ECDH-derived keys.
 - Signed announcements, unique packet IDs, duplicate suppression, and multi-hop flooding with TTL 5.
 - Local message history, acknowledgement-based status updates, and an Android foreground service for BLE activity.
+- BLE fragments, pending assemblies, and send queues are bounded. Failed no-link sends require manual retry.
 - Peer discovery and controls in **Discover**; Nearby conversations in **Chats**.
 
 ### Internet — Nostr
@@ -34,6 +41,7 @@ Users explicitly choose Nearby or Internet conversations. **Relay does not autom
 - Chats supports All / Nearby / Internet filters, search, and a New Chat flow.
 - Internet Setup guides users through selecting relay servers, publishing their inbox announcement, and sharing their public ID.
 - Internet chats can be reopened without entering an npub again; stored contacts and Internet message history survive app restarts.
+- Internet startup loads a bounded recent window. Open a conversation and use **Older messages** / **Latest messages** to read encrypted history in pages of 100 without reloading the archive on each update.
 
 ## Project structure
 
@@ -118,6 +126,8 @@ Emulator navigation tests do **not** prove that physical BLE radio discovery or 
 - Public Nostr relays can observe public routing metadata and availability; encryption protects message content, not all metadata.
 
 ## Automated verification and current limitations
+
+The current audit implementation and per-finding progress are recorded in [`docs/repository-audit.md`](docs/repository-audit.md). Its verification log distinguishes JVM/build checks from phone-only checks. Historical results below describe the earlier UI and are not proof that the current instrumentation suite has run.
 
 The most recent Codex review reported **105 JVM unit tests and 49 Android instrumented tests passed**, with a successful debug APK build. That review also noted that **live public-relay messaging and BLE on physical phones had not been verified**. These are reported results, not a claim of new tests run for this README update.
 

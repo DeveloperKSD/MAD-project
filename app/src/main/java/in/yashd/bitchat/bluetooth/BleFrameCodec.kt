@@ -8,9 +8,13 @@ internal object BleFrameCodec {
     private const val HEADER_BYTES = 10
     private const val MAX_FRAGMENTS = 512
     private const val ASSEMBLY_TIMEOUT_MS = 60_000L
+    private const val MAX_PACKET_BYTES = 4352
+    private const val MAX_ASSEMBLIES = 64
+    private const val MAX_LINK_ASSEMBLIES = 8
 
     fun encode(packet: ByteArray, maxValueBytes: Int, messageId: Int): List<ByteArray> {
         require(packet.isNotEmpty())
+        require(packet.size <= MAX_PACKET_BYTES)
         val chunkSize = maxValueBytes - HEADER_BYTES
         require(chunkSize > 0)
         val count = (packet.size + chunkSize - 1) / chunkSize
@@ -31,10 +35,11 @@ internal object BleFrameCodec {
     class Reassembler {
         private data class Assembly(
             val fragments: Array<ByteArray?>,
-            val createdAtMs: Long
+            val createdAtMs: Long,
+            var bytes: Int = 0
         )
 
-        private val assemblies = mutableMapOf<String, Assembly>()
+        private val assemblies = mutableMapOf<Pair<String, Int>, Assembly>()
 
         fun accept(linkId: String, frame: ByteArray, nowMs: Long = System.currentTimeMillis()): ByteArray? {
             require(frame.size > HEADER_BYTES)
@@ -46,18 +51,31 @@ internal object BleFrameCodec {
             require(count in 1..MAX_FRAGMENTS && index < count)
 
             assemblies.entries.removeAll { nowMs - it.value.createdAtMs > ASSEMBLY_TIMEOUT_MS }
-            val key = "$linkId:$messageId"
-            val assembly = assemblies.getOrPut(key) { Assembly(arrayOfNulls(count), nowMs) }
+            val key = linkId to messageId
+            val assembly = assemblies.getOrPut(key) {
+                require(assemblies.size < MAX_ASSEMBLIES && assemblies.keys.count { it.first == linkId } < MAX_LINK_ASSEMBLIES)
+                Assembly(arrayOfNulls(count), nowMs)
+            }
             require(assembly.fragments.size == count)
             val fragment = ByteArray(buffer.remaining()).also(buffer::get)
             val existing = assembly.fragments[index]
             require(existing == null || existing.contentEquals(fragment))
+            if (existing == null) {
+                if (assembly.bytes + fragment.size > MAX_PACKET_BYTES) {
+                    assemblies.remove(key)
+                    error("BLE packet too large")
+                }
+                assembly.bytes += fragment.size
+            }
             assembly.fragments[index] = fragment
             if (assembly.fragments.any { it == null }) return null
             assemblies.remove(key)
-            return assembly.fragments.filterNotNull().fold(ByteArray(0)) { packet, part -> packet + part }
+            val packet = ByteBuffer.allocate(assembly.bytes)
+            assembly.fragments.forEach { packet.put(it!!) }
+            return packet.array()
         }
 
         fun clear() = assemblies.clear()
+        fun clear(linkId: String) { assemblies.keys.removeAll { it.first == linkId } }
     }
 }

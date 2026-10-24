@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
+    <exclude domain="sharedpref" path="identity.xml" />
+    <exclude domain="sharedpref" path="messages.xml" />
     <!-- Defense in depth; identity is actually stored in noBackupFilesDir. -->
     <exclude domain="file" path="nostr_identity.enc" />
     <exclude domain="file" path="nostr_identity.enc.bak" />

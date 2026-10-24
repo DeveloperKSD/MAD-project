@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.serialization.json.*
 import okhttp3.OkHttpClient
 
-/** Independent, in-memory transport service. Futures run on one bounded worker; callbacks must
+/** Independent, in-memory transport service. Sends and receipts use separate bounded workers; callbacks must
  * be short. One transient connection plus at most three inbox connections, one subscription each.
  * No automatic publication replay: a timeout/disconnect after submission has unknown outcome.
  * Caller owns HTTP client. close() cancels sockets and pending work. No key authentication is sent.
@@ -33,6 +33,18 @@ class NostrMessagingCoordinator(
     private val nip17 = Nip17()
     private val worker = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
         ArrayBlockingQueue(32), { r -> Thread(r, "nostr-messaging").apply { isDaemon = true } })
+    private val receiver = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(32), { r -> Thread(r, "nostr-receiving").apply { isDaemon = true } },
+        RejectedExecutionHandler { runnable, executor ->
+            // Pause the socket reader instead of dropping history. No relay/lifecycle lock is held here.
+            while (!executor.isShutdown) {
+                if (executor.queue.offer(runnable, 100, TimeUnit.MILLISECONDS)) {
+                    if (executor.isShutdown && executor.remove(runnable)) (runnable as? Future<*>)?.cancel(false)
+                    return@RejectedExecutionHandler
+                }
+            }
+            throw RejectedExecutionException("Receiver closed")
+        })
     private val lifecycle = Any()
     private val callbackGate = Any()
     private val clients = mutableSetOf<NostrRelayClient>()
@@ -41,7 +53,7 @@ class NostrMessagingCoordinator(
     private val issueWakeup = AtomicBoolean()
     private val inboxes = mutableListOf<NostrRelayClient>()
     private val seen = linkedSetOf<String>()
-    private var receiveGeneration = 0L
+    @Volatile private var receiveGeneration = 0L
     @Volatile private var closed = false
     init { require(timeoutMillis in 100..60_000) }
     private fun safe(action: () -> Unit) { try { action() } catch (_: Exception) { } }
@@ -64,16 +76,21 @@ class NostrMessagingCoordinator(
         issueWakeup.set(false)
         batch.forEach { (url, value) -> notifyUser { onRelayIssue(url, value) } }
     }
-    private fun <T> task(action: () -> T): Future<T> = synchronized(lifecycle) {
-        checkActive()
-        val future = object : FutureTask<T>(Callable {
-            try { checkActive(); action() } finally { drainIssues() }
-        }) {
-            override fun done() { synchronized(lifecycle) { work.remove(this) } }
+    private fun <T> task(executor: ThreadPoolExecutor = worker, action: () -> T): Future<T> {
+        val future = synchronized(lifecycle) {
+            checkActive()
+            val future = object : FutureTask<T>(Callable {
+                try { checkActive(); action() } finally { drainIssues() }
+            }) {
+                override fun done() { synchronized(lifecycle) { work.remove(this) } }
+            }
+            work.add(future)
+            future
         }
-        work.add(future)
-        try { worker.execute(future) } catch (e: RejectedExecutionException) { work.remove(future); throw e }
-        future
+        try { executor.execute(future) }
+        catch (e: Exception) { future.cancel(false); throw e }
+        if (closed) future.cancel(true)
+        return future
     }
     private fun client(url: String, response: (RelayResponse) -> Unit,
                        state: (NostrRelayClient.State) -> Unit = {}, persistent: Boolean = false): NostrRelayClient {
@@ -202,7 +219,9 @@ class NostrMessagingCoordinator(
         relays.distinct().forEach { url ->
             val c = client(url, { r ->
                 when (r) {
-                    is RelayResponse.Event -> try { task {
+                    is RelayResponse.Event -> try {
+                        if (receiver.queue.remainingCapacity() == 0) issue(url, Issue.RECEIVE_QUEUE_FULL)
+                        task(receiver) {
                         if (generation != receiveGeneration) return@task
                         val rumor = try { identity.withSecret { checkActive(); nip17.decodeIncoming(r.event, it) } }
                             catch (_: Exception) { return@task }
@@ -212,7 +231,8 @@ class NostrMessagingCoordinator(
                             if (seen.size > 4096) seen.remove(seen.first())
                             notifyUser { onReceived(rumor) }
                         }
-                    } } catch (_: RejectedExecutionException) { issue(url, Issue.RECEIVE_QUEUE_FULL) }
+                    } } catch (_: RejectedExecutionException) { if (!closed) issue(url, Issue.RECEIVE_QUEUE_FULL) }
+                    catch (_: InterruptedException) { Thread.currentThread().interrupt() }
                     catch (_: IllegalStateException) { /* Closed coordinator. */ }
                     is RelayResponse.Closed -> issue(url, Issue.SUBSCRIPTION_CLOSED)
                     else -> Unit
@@ -235,6 +255,7 @@ class NostrMessagingCoordinator(
         tasks.forEach { it.cancel(true) }
         sockets.forEach(::release)
         worker.shutdownNow().forEach { (it as? Future<*>)?.cancel(false) }
+        receiver.shutdownNow().forEach { (it as? Future<*>)?.cancel(false) }
         synchronized(pendingIssues) { pendingIssues.clear() }
     }
 }

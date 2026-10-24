@@ -20,9 +20,9 @@ class BluetoothReadinessChecker(private val context: Context) {
         return BluetoothReadiness(
             hasBle = hasBle,
             hasPermissions = hasPermissions,
-            bluetoothEnabled = adapter?.isEnabled == true,
-            canAdvertise = adapter?.bluetoothLeAdvertiser != null,
-            canScan = adapter?.bluetoothLeScanner != null,
+            bluetoothEnabled = hasPermissions && adapter?.isEnabled == true,
+            canAdvertise = hasPermissions && adapter?.bluetoothLeAdvertiser != null,
+            canScan = hasPermissions && adapter?.bluetoothLeScanner != null,
             canGattServer = manager != null
         )
     }

@@ -28,6 +28,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -100,6 +101,11 @@ fun RelayHome(
 
     val chatRoute = chat
     val contactRoute = contact
+    LaunchedEffect(chatRoute, internet.storageLoading) {
+        if (chatRoute != null && !routeIsNearby(chatRoute) && !internet.storageLoading) {
+            model.loadConversation(routeTarget(chatRoute).orEmpty())
+        }
+    }
     val items = buildChatList(internet, mesh, seenAt, sessionStart)
     val myName = mesh.displayName
 
@@ -201,7 +207,9 @@ fun RelayHome(
                         openSetup = { setupOpen = true },
                         openDiscover = { goTab(1) },
                         markSeen = { seenAt[chatRoute] = System.currentTimeMillis() },
-                        toast = toast
+                        toast = toast,
+                        olderMessages = { model.loadConversation(chatRoute.substringAfter(':'), older = true) },
+                        latestMessages = { model.loadConversation(chatRoute.substringAfter(':')) }
                     )
                     tab == 0 -> RelayChatsScreen(
                         items = items,

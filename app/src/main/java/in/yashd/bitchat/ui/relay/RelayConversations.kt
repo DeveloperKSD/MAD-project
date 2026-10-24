@@ -23,7 +23,7 @@ fun relayConversations(internet: RelayUiState, mesh: MeshUiState): List<RelayCon
         val record = records[peer]
         val npub = record?.npub ?: publicNpub(peer)
         RelayConversation("internet:$peer", record?.displayName?.ifBlank { npub } ?: npub,
-            messagesByPeer[peer]?.lastOrNull()?.body ?: "Say hello · Internet chat",
+            messagesByPeer[peer]?.lastOrNull()?.body ?: if (record?.lastMessageAtMs != null) "Open to read saved messages" else "Say hello · Internet chat",
             ConversationTransport.Internet, npub)
     }
     return (nearby + internetRows).asReversed()
@@ -34,7 +34,7 @@ fun filterConversations(rows: List<RelayConversation>, filter: ConversationFilte
 }
 /** The nullable recipient is reserved for a deliberately selected public Nearby group. */
 fun sendNearbySafely(body: String, peerId: String?, peers: List<PeerState>, send: (String, String?) -> Unit): Boolean {
-    if (body.isBlank() || peerId != null && peers.none { it.identity.peerId == peerId }) return false
+    if (body.isBlank() || peerId != null && peers.none { it.identity.peerId == peerId && it.state != PeerConnectionState.Disconnected }) return false
     send(body, peerId)
     return true
 }

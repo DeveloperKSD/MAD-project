@@ -8,7 +8,7 @@ import kotlinx.serialization.json.JsonObject
 import okhttp3.*
 import okio.ByteString
 
-/** One relay connection. Callbacks run serially under the client lock; keep them short.
+/** One relay connection. Message callbacks run on the socket reader, outside the client lock.
  * The supplied OkHttpClient remains owned by the caller. close() releases this client's resources.
  * Publish returns queue admission only; Acceptance responses report relay acceptance, not delivery.
  * Publications are never replayed automatically (disconnects leave their outcome unknown).
@@ -71,24 +71,27 @@ class NostrRelayClient(
                 subscriptions.values.toList().forEach { webSocket.send(it) }
                 transition(State.CONNECTED)
             }
-            override fun onMessage(webSocket: WebSocket, text: String) = synchronized(this@NostrRelayClient) {
-                if (stopped || epoch != generation) return@synchronized
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                val decoded = synchronized(this@NostrRelayClient) {
+                if (stopped || epoch != generation) return
                 if (text.length > maxMessageBytes || text.toByteArray(Charsets.UTF_8).size > maxMessageBytes) {
                     notifySafely(onInvalidMessage)
                     failed(epoch)
-                    return@synchronized
+                    return
                 }
                 val response = NostrRelayProtocol.decode(text, maxMessageBytes)
-                if (response == null) { notifySafely(onInvalidMessage); return@synchronized }
+                if (response == null) { notifySafely(onInvalidMessage); return }
                 val id = when (response) {
                     is RelayResponse.Event -> response.subscriptionId
                     is RelayResponse.EndOfStoredEvents -> response.subscriptionId
                     is RelayResponse.Closed -> response.subscriptionId
                     else -> null
                 }
-                if (id != null && id !in subscriptions) return@synchronized
+                if (id != null && id !in subscriptions) return
                 if (response is RelayResponse.Closed) subscriptions.remove(response.subscriptionId)
-                notifySafely { onResponse(response) }
+                response
+                }
+                notifySafely { onResponse(decoded) }
             }
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) = synchronized(this@NostrRelayClient) {
                 if (stopped || epoch != generation) return@synchronized

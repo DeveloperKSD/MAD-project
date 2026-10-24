@@ -75,7 +75,8 @@ internal fun RelayContactScreen(
     }
 
     if (verify) {
-        val fingerprint = peer?.identity?.encryptionPublicKey
+        val fingerprint = peer?.identity?.let { java.security.MessageDigest.getInstance("SHA-256")
+            .digest(it.encryptionPublicKey + it.signingPublicKey) }
             ?.take(16)
             ?.joinToString("") { "%02x".format(it.toInt() and 255) }
             ?.chunked(4)
@@ -146,7 +147,7 @@ internal fun RelayContactScreen(
                     title = "Bluetooth",
                     subtitle = when {
                         !info.nearby -> "Not paired nearby"
-                        bluetoothOn -> "Direct connection available"
+                        bluetoothOn -> if (peer?.directDeviceAddress != null) "Nearby link available" else "Mesh route available"
                         peer != null && peer.state == PeerConnectionState.Connecting -> "In range • connecting"
                         !mesh.serviceRunning -> "Nearby is off"
                         else -> "Not in range right now"

@@ -45,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -155,7 +156,9 @@ internal fun RelayChatScreen(
     openSetup: () -> Unit,
     openDiscover: () -> Unit,
     markSeen: () -> Unit,
-    toast: (String) -> Unit
+    toast: (String) -> Unit,
+    olderMessages: () -> Unit = {},
+    latestMessages: () -> Unit = {}
 ) {
     val context = LocalContext.current
     // Draft stays in memory only (saved state is not encrypted storage).
@@ -166,14 +169,20 @@ internal fun RelayChatScreen(
     val lastMineId = bubbles.lastOrNull { it.mine }?.id
     val listState = rememberLazyListState()
 
-    LaunchedEffect(info.route, rows.size) {
-        if (rows.isNotEmpty()) listState.animateScrollToItem(rows.lastIndex)
+    var openedRoute by remember { mutableStateOf<String?>(null) }
+    val layout = listState.layoutInfo
+    val nearBottom = layout.visibleItemsInfo.lastOrNull()?.index?.let { it >= layout.totalItemsCount - 3 } ?: true
+    LaunchedEffect(info.route, bubbles.lastOrNull()?.id) {
+        if (rows.isNotEmpty() && (openedRoute != info.route || nearBottom || bubbles.lastOrNull()?.mine == true)) {
+            listState.animateScrollToItem(rows.lastIndex)
+        }
+        openedRoute = info.route
     }
     LaunchedEffect(info.route, bubbles.size) { markSeen() }
 
     val internetKey = if (info.nearby) null else runCatching { RelayViewModel.recipientKey(info.publicId) }.getOrNull()
     val canSend = if (info.nearby) draft.isNotBlank() else
-        !internet.storageLoading && internet.storageError == null && !internet.busy && draft.isNotBlank() &&
+        !internet.storageLoading && !internet.threadLoading && internet.storageError == null && !internet.busy && draft.isNotBlank() &&
             internetKey != null && internet.npub.isNotEmpty() && internet.inboxes.isNotEmpty()
 
     val send: () -> Unit = {
@@ -215,6 +224,13 @@ internal fun RelayChatScreen(
             !info.nearby && internet.inboxes.isEmpty() -> Notice("Set up Internet messaging before you can send.", "Set up", openSetup)
         }
         if (!info.nearby) internet.notice?.let { Notice(it) }
+        if (info.nearby) mesh.errors.lastOrNull()?.let { Notice(it) }
+        if (!info.nearby) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                TextButton(onClick = olderMessages, enabled = !internet.threadLoading && internet.threadHasOlder) { Text("Older messages") }
+                TextButton(onClick = latestMessages, enabled = !internet.threadLoading) { Text("Latest messages") }
+            }
+        }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (rows.isEmpty()) {
@@ -232,7 +248,7 @@ internal fun RelayChatScreen(
             } else {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().testTag("relay-message-list"),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {

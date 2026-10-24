@@ -38,8 +38,7 @@ class GuidedInternetUiTest {
         val store = ViewModelStore(); store.put("relay", model)
         model.start()
         try {
-            compose.setContent { RelayApp(model) }
-            repeat(3) { compose.onNodeWithText("Continue").performScrollTo().performClick() }
+            compose.setContent { `in`.yashd.bitchat.RelayHome(model, `in`.yashd.bitchat.mesh.MeshUiState(), {}, {}, {}, {}) }
             test(model, backend)
         } finally { store.clear() }
     }
@@ -49,8 +48,8 @@ class GuidedInternetUiTest {
     }
     private fun beginSetup() {
         compose.onNodeWithText("Settings").performClick()
-        compose.onNodeWithTag("relay-settings-list").performScrollToNode(hasText("Internet Setup"))
-        compose.onNodeWithText("Internet Setup").performClick()
+        compose.onNodeWithTag("relay-settings-list").performScrollToNode(hasText("Nostr Relays"))
+        compose.onNodeWithText("Nostr Relays").performClick()
     }
     private fun enterServers() {
         setupNode("Discovery server addresses").performTextReplacement("wss://discovery.example")
@@ -65,7 +64,7 @@ class GuidedInternetUiTest {
         compose.runOnIdle { assertEquals(0, model.state.value.setup.step); assertNotNull(model.state.value.setup.error) }
         enterServers()
         compose.runOnIdle { assertEquals(1, model.state.value.setup.step); assertFalse(model.state.value.readyToShare) }
-        compose.onNodeWithText("Chats").performClick()
+        setupNode("Save for later").performClick()
         beginSetup()
         compose.onNodeWithText("Make yourself reachable").assertIsDisplayed()
         setupNode("Next").assertIsNotEnabled()
@@ -91,8 +90,8 @@ class GuidedInternetUiTest {
         setupNode("Finish").assertIsNotEnabled()
         compose.runOnIdle { model.start(); backend.connection("wss://inbox.example", "connected") }
         setupNode("Finish").performClick()
-        compose.onNodeWithTag("relay-settings-list").performScrollToNode(hasText("Review Internet Setup"))
-        compose.onNodeWithText("Review Internet Setup").assertIsDisplayed()
+        compose.onNodeWithTag("relay-settings-list").performScrollToNode(hasText("Nostr Relays"))
+        compose.onNodeWithText("Nostr Relays").assertIsDisplayed()
     }
     @Test fun retryConnectionClearsOldSocketStatus() = withApp { model, backend ->
         beginSetup(); enterServers()
@@ -106,7 +105,7 @@ class GuidedInternetUiTest {
     }
     @Test fun duplicateOnlineAddsProduceOneNamedRowAndRememberPublicKey() = withApp { model, _ ->
         repeat(2) {
-            compose.onNodeWithText("New Chat").performClick()
+            compose.onNodeWithContentDescription("New Chat").performClick()
             compose.onNodeWithText("Chat Online").performClick()
             compose.onNodeWithText("Friend’s public Relay ID (npub)").performTextReplacement(if (it == 0) npub else npub.uppercase())
             compose.onNodeWithText("Name for this chat (optional)").performTextReplacement("Aarav")
@@ -114,9 +113,10 @@ class GuidedInternetUiTest {
             compose.onNodeWithContentDescription("Back to Chats").performClick()
         }
         compose.runOnIdle { assertEquals(1, model.state.value.conversations.size); assertTrue(model.state.value.messages.isEmpty()) }
-        compose.onAllNodesWithTag("conversation-internet:${"01".repeat(32)}").assertCountEquals(1)
+        compose.onAllNodesWithText("Aarav").assertCountEquals(1)
         compose.onNodeWithText("Aarav").performClick()
-        compose.onNodeWithText("Friend’s public ID").performClick()
+        compose.onNodeWithText("Aarav").performClick()
+        compose.onNodeWithText("Verify identity").performScrollTo().performClick()
         compose.onNodeWithText(npub).assertIsDisplayed()
         compose.onNodeWithText("Friend’s public Relay ID (npub)").assertDoesNotExist()
     }

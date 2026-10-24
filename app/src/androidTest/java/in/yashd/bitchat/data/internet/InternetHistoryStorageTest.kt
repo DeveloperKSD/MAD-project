@@ -258,6 +258,21 @@ class InternetHistoryStorageTest {
         instances.first().contact(owner, peer, "Preserved across instances")
         instances.forEach { assertEquals("Preserved across instances", it.load(owner).contacts.single().name) }
     }
+    @Test fun historyLoadsBoundedPagesAndSingleRecordChanges() = runBlocking(Dispatchers.IO) {
+        val repository = repo()
+        repeat(230) { repository.outgoing(owner, "row-${it.toString().padStart(3, '0')}", peer, "message-$it", it.toLong()) }
+        assertEquals(200, repository.load(owner).messages.size)
+        assertEquals(230, run { var count = 0; raw { count = it.history().messages(owner).size }; count })
+        val latest = repository.page(owner, peer)
+        assertEquals(100, latest.size)
+        assertEquals("message-130", latest.first().body)
+        val older = repository.page(owner, peer, latest.first().createdAtMs, latest.first().recordId)
+        assertEquals("message-30", older.first().body)
+        assertEquals(100, older.size)
+        val change = repository.changes(owner, "row-000", null)
+        assertEquals("message-0", change.messages.single().body)
+        assertEquals(1, change.contacts.size)
+    }
     private fun publication(stage: NostrMessagingCoordinator.Stage) = NostrMessagingCoordinator.Publication("event-id", "wss://relay.example/?secret=relay-token", stage)
     private fun accepted() = NostrMessagingCoordinator.SendResult(listOf(publication(NostrMessagingCoordinator.Stage.RELAY_ACCEPTED)), emptyList())
 }

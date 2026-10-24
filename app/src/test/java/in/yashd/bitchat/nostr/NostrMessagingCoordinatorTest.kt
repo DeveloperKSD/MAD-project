@@ -261,7 +261,7 @@ class NostrMessagingCoordinatorTest {
         val readsOnWorker = LinkedBlockingQueue<Boolean>()
         val id = NostrIdentityManager(object : NostrIdentityStorage {
             override fun read(): ByteArray {
-                readsOnWorker.add(Thread.currentThread().name == "nostr-messaging")
+                readsOnWorker.add(Thread.currentThread().name in setOf("nostr-messaging", "nostr-receiving"))
                 if (block.get()) {
                     entered.countDown()
                     permit.acquireUninterruptibly()
@@ -420,7 +420,9 @@ class NostrMessagingCoordinatorTest {
                 ws.send("[\"AUTH\",\"challenge while full\"]")
                 Thread.sleep(700)
                 permit.release()
-                val observed = (1..2).map { issues.poll(5, TimeUnit.SECONDS) }
+                val observed = mutableSetOf<NostrMessagingCoordinator.Issue>()
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+                while (observed.size < 2 && System.nanoTime() < deadline) issues.poll(100, TimeUnit.MILLISECONDS)?.let { observed.add(it) }
                 assertTrue(observed.contains(NostrMessagingCoordinator.Issue.RECEIVE_QUEUE_FULL))
                 assertTrue(observed.contains(NostrMessagingCoordinator.Issue.AUTHENTICATION_REQUIRED))
                 assertEquals("once", received.poll(5, TimeUnit.SECONDS)!!.content)
@@ -439,6 +441,25 @@ class NostrMessagingCoordinatorTest {
         }
         NostrMessagingCoordinator(manager(), n.http, listOf(url), timeoutMillis = 300).use { c ->
             assertNull(c.discover(pub(bob)).get(5, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test fun receivingBackpressurePreservesEveryDistinctMessage(): Unit = Network().use { n ->
+        val sockets = LinkedBlockingQueue<WebSocket>()
+        val received = LinkedBlockingQueue<String>()
+        val url = n.relay { ws, text -> if (fields(text)[0].jsonPrimitive.content == "REQ") sockets.add(ws) }
+        NostrMessagingCoordinator(manager(), n.http, listOf(url), onReceived = {
+            Thread.sleep(5)
+            received.add(it.content)
+        }).use { c ->
+            c.startReceiving(listOf(url)).get(5, TimeUnit.SECONDS)
+            val socket = sockets.poll(5, TimeUnit.SECONDS)!!
+            repeat(80) { index ->
+                val wrap = Nip17().createMessage(bob, pub(alice), "message-$index").recipientCopy
+                socket.send("[\"EVENT\",\"inbox\",${NostrEventCodec.encode(wrap)}]")
+            }
+            val actual = (0 until 80).map { received.poll(15, TimeUnit.SECONDS) }
+            assertEquals((0 until 80).map { "message-$it" }, actual)
         }
     }
 

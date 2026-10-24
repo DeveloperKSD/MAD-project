@@ -37,7 +37,7 @@ class AndroidInternetBackend(private val identity: NostrIdentityManager) : Inter
                     NostrMessagingCoordinator.Issue.AUTHENTICATION_REQUIRED -> "This server requires a login Relay does not support yet. Choose another server."
                     NostrMessagingCoordinator.Issue.SUBSCRIPTION_CLOSED -> "A server closed your inbox subscription. Retry or choose another inbox server."
                     NostrMessagingCoordinator.Issue.CONNECTION_ERROR -> "A server connection failed. Check your Internet connection and server addresses, then retry."
-                    NostrMessagingCoordinator.Issue.RECEIVE_QUEUE_FULL -> "Incoming messages are temporarily busy. Keep Relay open and try again."
+                    NostrMessagingCoordinator.Issue.RECEIVE_QUEUE_FULL -> "Incoming messages are catching up. Keep Relay open."
                     else -> "A server sent unsupported data. If this continues, choose another server."
                 })
             },
@@ -57,8 +57,8 @@ class AndroidInternetBackend(private val identity: NostrIdentityManager) : Inter
 }
 
 data class InternetMessage(val id: String, val peer: String, val body: String,
-                           val outgoing: Boolean, val status: String, val createdAtMs: Long = 0)
-data class InternetConversation(val publicKey: String, val npub: String, val displayName: String = "")
+                           val outgoing: Boolean, val status: String, val createdAtMs: Long = 0, val rumorId: String? = null)
+data class InternetConversation(val publicKey: String, val npub: String, val displayName: String = "", val lastMessageAtMs: Long? = null)
 enum class InboxAnnouncement { NOT_PUBLISHED, PUBLISHING, ACCEPTED, PARTIAL, FAILED, UNKNOWN }
 data class InternetSetupState(
     val step: Int = 0, val discoveryDraft: String = "", val inboxDraft: String = "",
@@ -72,7 +72,9 @@ data class RelayUiState(
     val messages: List<InternetMessage> = emptyList(), val busy: Boolean = false,
     val active: Boolean = false, val notice: String? = null, val error: String? = null,
     val storageLoading: Boolean = true, val storageError: String? = null,
-    val conversations: List<InternetConversation> = emptyList(), val setup: InternetSetupState = InternetSetupState()
+    val conversations: List<InternetConversation> = emptyList(), val setup: InternetSetupState = InternetSetupState(),
+    val threadPeer: String? = null, val thread: List<InternetMessage> = emptyList(),
+    val threadLoading: Boolean = false, val threadLatest: Boolean = true, val threadHasOlder: Boolean = false
 ) {
     val inboxesConnected: Boolean get() = active && inboxes.isNotEmpty() && inboxes.all { connections[it] == "connected" }
     val readyToShare: Boolean get() = !storageLoading && storageError == null && inboxesConnected && setup.announcement == InboxAnnouncement.ACCEPTED && npub.isNotEmpty()
@@ -114,17 +116,57 @@ class RelayViewModel(private val backend: InternetBackend,
     }
     private fun showHistory(snapshot: HistorySnapshot) {
         mutable.update { it.copy(storageLoading = false,
-            conversations = snapshot.contacts.map { c -> InternetConversation(c.peer, publicNpub(c.peer), c.name) },
-            messages = snapshot.messages.map { m -> InternetMessage(m.recordId, m.peer, m.body, m.outgoing, m.status.label(), m.createdAtMs) }) }
+            conversations = snapshot.contacts.map { c -> InternetConversation(c.peer, publicNpub(c.peer), c.name, c.lastMessageAtMs) },
+            messages = snapshot.messages.map { it.toUi() }) }
     }
-    private suspend fun store(action: suspend (String) -> Unit): Boolean {
+    private fun SavedMessage.toUi() = InternetMessage(recordId, peer, body, outgoing, status.label(), createdAtMs, rumorId)
+    private fun mergeHistory(snapshot: HistorySnapshot) {
+        val changed = snapshot.messages.map { it.toUi() }
+        fun merge(previous: List<InternetMessage>, updates: List<InternetMessage>, limit: Int) =
+            (previous.filter { old -> updates.none { it.id == old.id || it.rumorId != null && it.rumorId == old.rumorId } } + updates)
+                .sortedWith(compareBy<InternetMessage> { it.createdAtMs }.thenBy { it.id }).takeLast(limit)
+        mutable.update { old -> old.copy(
+            conversations = (old.conversations.associateBy { it.publicKey } + snapshot.contacts.associate {
+                it.peer to InternetConversation(it.peer, publicNpub(it.peer), it.name,
+                    listOfNotNull(it.lastMessageAtMs, old.conversations.firstOrNull { previous -> previous.publicKey == it.peer }?.lastMessageAtMs).maxOrNull()) }).values.toList(),
+            messages = merge(old.messages, changed, 200),
+            thread = merge(old.thread, changed.filter { it.peer == old.threadPeer &&
+                (old.threadLatest || old.thread.any { row -> row.id == it.id }) }, 100)) }
+    }
+    fun loadConversation(npub: String, older: Boolean = false) {
+        val peer = runCatching { recipientKey(npub) }.getOrNull() ?: return
+        val snapshot = state.value
+        if (snapshot.storageLoading || snapshot.storageError != null || snapshot.threadLoading && snapshot.threadPeer == peer) return
+        val before = if (older && snapshot.threadPeer == peer) snapshot.thread.firstOrNull() else null
+        mutable.update { if (it.threadPeer == peer) it.copy(threadLoading = true)
+            else it.copy(threadPeer = peer, thread = emptyList(), threadLoading = true, threadLatest = true, threadHasOlder = false) }
+        scope.launch {
+            try {
+                historyGate.withLock {
+                    val page = history.page(state.value.publicKey, peer, before?.createdAtMs, before?.id.orEmpty())
+                    mutable.update { if (it.threadPeer != peer) it else it.copy(threadLoading = false,
+                        thread = if (page.isEmpty() && older) it.thread else page.map { row -> row.toUi() },
+                        threadLatest = if (page.isEmpty() && older) it.threadLatest else before == null,
+                        threadHasOlder = page.size == 100) }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { mutable.update { it.copy(threadLoading = false) }; storageFailure() }
+        }
+    }
+    private suspend fun store(id: String? = null, peer: String? = null, action: suspend (String) -> Unit): Boolean {
         if (state.value.storageError != null || state.value.storageLoading) return false
         return try {
             historyGate.withLock {
                 if (state.value.storageError != null) return false
                 val owner = state.value.publicKey
                 action(owner)
-                showHistory(history.load(owner))
+                val changes = history.changes(owner, id, peer)
+                mergeHistory(changes)
+                val threadPeer = state.value.threadPeer
+                if (threadPeer != null && !state.value.threadLatest && changes.messages.any { it.peer == threadPeer && it.outgoing && it.status == HistoryStatus.QUEUED }) {
+                    val latest = history.page(owner, threadPeer)
+                    mutable.update { if (it.threadPeer != threadPeer) it else it.copy(thread = latest.map { row -> row.toUi() }, threadLatest = true, threadHasOlder = latest.size == 100) }
+                }
             }
             true
         } catch (e: CancellationException) { throw e }
@@ -196,7 +238,7 @@ class RelayViewModel(private val backend: InternetBackend,
         val key = try { recipientKey(npub) } catch (_: Exception) { return null }
         val name = displayName.trim()
         if (name.length > 60 || name.any { it.isISOControl() }) return null
-        return if (store { owner -> history.contact(owner, key, name) }) publicNpub(key) else null
+        return if (store(peer = key) { owner -> history.contact(owner, key, name) }) publicNpub(key) else null
     }
     private fun connect() {
         val snapshot = state.value
@@ -207,7 +249,9 @@ class RelayViewModel(private val backend: InternetBackend,
             if (current()) scope.launch {
                 val outgoing = rumor.pubkey == state.value.publicKey
                 val peer = if (outgoing) rumor.tags.firstOrNull { it.firstOrNull() == "p" }?.getOrNull(1) ?: rumor.pubkey else rumor.pubkey
-                store { owner -> history.received(owner, NostrEventCodec.calculateId(rumor), peer, rumor.content, outgoing, rumor.createdAtSeconds * 1000) }
+                val id = NostrEventCodec.calculateId(rumor)
+                if (rumor.createdAtSeconds > Long.MAX_VALUE / 1000) return@launch
+                store(id) { owner -> history.received(owner, id, peer, rumor.content, outgoing, rumor.createdAtSeconds * 1000) }
             }
         }, { url, status -> mutable.update { if (current()) it.copy(connections = it.connections + (url to status)) else it } },
             { message -> mutable.update { if (current()) it.copy(error = message) else it } })
@@ -246,6 +290,7 @@ class RelayViewModel(private val backend: InternetBackend,
     }
     fun send(npub: String, body: String) {
         val recipient = try { recipientKey(npub) } catch (_: Exception) { error("Enter a valid recipient npub with a correct checksum."); return }
+        if (state.value.threadLoading && state.value.threadPeer == recipient) { error("Wait for this conversation to finish loading."); return }
         if (body.isBlank() || body.toByteArray(Charsets.UTF_8).size > 16_000) { error("Enter a message of 1–16,000 UTF-8 bytes."); return }
         val id = UUID.randomUUID().toString()
         perform { transport, _ ->
@@ -253,21 +298,21 @@ class RelayViewModel(private val backend: InternetBackend,
                 // Finish the durable enqueue even if lifecycle cancellation arrives during the
                 // commit, then mark it unknown before leaving. Never publish after cancellation.
                 if (!withContext(NonCancellable) {
-                    store { owner -> history.outgoing(owner, id, recipient, body, System.currentTimeMillis()) }
+                    store(id) { owner -> history.outgoing(owner, id, recipient, body, System.currentTimeMillis()) }
                 }) return@perform
                 currentCoroutineContext().ensureActive()
                 val result = await(transport.send(recipient, body) { rumorId ->
                     // Coordinator worker, outside its callback lock; a failed durable bind aborts publication.
                     runBlocking {
-                        if (!store { owner -> history.bindRumor(owner, id, rumorId) }) throw LocalHistoryException()
+                        if (!store(id) { owner -> history.bindRumor(owner, id, rumorId) }) throw LocalHistoryException()
                     }
                 })
-                if (!store { owner -> history.publication(owner, id, result) }) return@perform
+                if (!store(id) { owner -> history.publication(owner, id, result) }) return@perform
                 mutable.update { it.copy(
                     notice = if (result.sender.none { p -> p.stage == NostrMessagingCoordinator.Stage.RELAY_ACCEPTED }) "Your inbox copy was not accepted by a relay." else it.notice,
                     error = if (publicationStatus(result) != HistoryStatus.RELAY_ACCEPTED) publicationStatus(result).label() else null) }
             } catch (e: Exception) {
-                withContext(NonCancellable) { store { owner -> history.failed(owner, id, unknown = true) } }
+                withContext(NonCancellable) { store(id) { owner -> history.failed(owner, id, unknown = true) } }
                 throw e
             }
         }

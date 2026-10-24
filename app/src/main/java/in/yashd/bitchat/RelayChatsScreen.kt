@@ -143,7 +143,7 @@ internal fun nearbyThread(mesh: MeshUiState, peerId: String?): List<ChatMessage>
 /** Messages of one Internet conversation. */
 internal fun internetThread(internet: RelayUiState, npub: String): List<InternetMessage> {
     val key = runCatching { RelayViewModel.recipientKey(npub) }.getOrNull() ?: return emptyList()
-    return internet.messages.filter { it.peer == key }
+    return if (internet.threadPeer == key) internet.thread else internet.messages.filter { it.peer == key }
 }
 
 /** One row of the Chats list. */
@@ -199,7 +199,8 @@ internal fun buildChatList(
             ChatListItem(
                 info = info,
                 preview = last?.body ?: row.preview,
-                lastAtMs = last?.createdAtMs?.takeIf { it > 0 },
+                lastAtMs = last?.createdAtMs?.takeIf { it > 0 }
+                    ?: internet.conversations.firstOrNull { it.publicKey == last?.peer || it.npub == info.publicId }?.lastMessageAtMs,
                 waiting = mineLast && last?.status == "Sending…",
                 failed = mineLast && last?.status?.startsWith("Failed") == true,
                 unread = thread.count { !it.outgoing && it.createdAtMs > since }
@@ -212,7 +213,7 @@ internal fun buildChatList(
 // Chats screen (Figma 1)
 // ---------------------------------------------------------------------------
 
-private val chatFilters = listOf("All", "Nearby", "Offline", "Favorites")
+private val chatFilters = listOf("All", "Nearby", "Internet", "Offline", "Favorites")
 
 @Composable
 internal fun RelayChatsScreen(

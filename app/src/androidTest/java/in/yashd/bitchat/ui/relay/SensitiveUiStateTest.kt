@@ -14,7 +14,7 @@ class SensitiveUiStateTest {
 
     @Test fun messageDraftDoesNotRestoreFromAndroidSavedState() {
         val restoration = StateRestorationTester(compose)
-        restoration.setContent { RelayTheme { PrivateChat(RelayUiState(storageLoading = false), "invalid", {}, { _, _ -> }) } }
+        restoration.setContent { CurrentChat(RelayUiState(storageLoading = false), "invalid") }
         compose.onNode(hasSetTextAction()).performTextInput("PRIVATE_UNSENT_BODY")
         compose.onNode(hasSetTextAction()).assertTextContains("PRIVATE_UNSENT_BODY")
         restoration.emulateSavedInstanceStateRestore()
@@ -24,7 +24,7 @@ class SensitiveUiStateTest {
 
     @Test fun unsavedContactNameDoesNotRestoreFromAndroidSavedState() {
         val restoration = StateRestorationTester(compose)
-        restoration.setContent { RelayTheme { OnlineChatScreen({ _, _ -> null }, {}, {}, {}) } }
+        restoration.setContent { `in`.yashd.bitchat.RelayDesignTheme { OnlineChatScreen({ _, _ -> null }, {}, {}, {}) } }
         compose.onNodeWithText("Name for this chat (optional)").performTextInput("PRIVATE_CONTACT_DRAFT")
         restoration.emulateSavedInstanceStateRestore()
         compose.onNodeWithText("PRIVATE_CONTACT_DRAFT").assertDoesNotExist()
@@ -33,7 +33,7 @@ class SensitiveUiStateTest {
 
     @Test fun sensitiveSearchDoesNotRestoreFromAndroidSavedState() {
         val restoration = StateRestorationTester(compose)
-        restoration.setContent { RelayTheme { Conversations(emptyList(), {}, {}, {}) } }
+        restoration.setContent { CurrentChats() }
         compose.onNode(hasSetTextAction()).performTextInput("PRIVATE_SEARCH_TEXT")
         restoration.emulateSavedInstanceStateRestore()
         compose.onNodeWithText("PRIVATE_SEARCH_TEXT").assertDoesNotExist()
