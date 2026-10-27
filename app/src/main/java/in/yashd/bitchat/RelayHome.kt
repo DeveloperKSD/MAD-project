@@ -32,6 +32,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -54,6 +55,7 @@ import `in`.yashd.bitchat.mesh.MeshUiState
 import `in`.yashd.bitchat.ui.relay.InternetSetupScreen
 import `in`.yashd.bitchat.ui.relay.OnlineChatScreen
 import `in`.yashd.bitchat.ui.relay.PinnedChatsStore
+import `in`.yashd.bitchat.ui.relay.PinnedMessagesStore
 import `in`.yashd.bitchat.ui.relay.RelayViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -98,6 +100,12 @@ fun RelayHome(
     val context = LocalContext.current
     val pinStore = remember { PinnedChatsStore(context) }
     val pinned by pinStore.pinned.collectAsState()
+    // Pinned messages inside chats are saved the same way (ids only).
+    val messagePinStore = remember { PinnedMessagesStore(context) }
+    val pinnedMessages by messagePinStore.pinned.collectAsState()
+    // Pull-down refresh on the Chats list.
+    var refreshing by remember { mutableStateOf(false) }
+    var refreshedAt by remember { mutableLongStateOf(0L) }
     val sessionStart = remember { System.currentTimeMillis() }
     val now by produceState(System.currentTimeMillis()) {
         while (true) {
@@ -136,6 +144,7 @@ fun RelayHome(
         if (routeIsNearby(route)) MeshRuntime.deleteConversation(target)
         else if (target != null) model.deleteConversation(target)
         pinStore.remove(route)
+        messagePinStore.removeChat(route)
         favorites.remove(route)
         muted.remove(route)
         seenAt.remove(route)
@@ -235,12 +244,14 @@ fun RelayHome(
                         deleteInternetMessage = model::deleteMessage,
                         pinned = chatRoute in pinned,
                         togglePin = { togglePin(chatRoute) },
-                        deleteChat = { deleteChat(chatRoute) }
+                        deleteChat = { deleteChat(chatRoute) },
+                        pinnedMessages = pinnedMessages[chatRoute].orEmpty(),
+                        togglePinMessage = { id -> messagePinStore.toggle(chatRoute, id) }
                     )
                     tab == 0 -> RelayChatsScreen(
                         items = items,
                         myName = myName,
-                        now = now,
+                        now = maxOf(now, refreshedAt),
                         favorites = favorites,
                         loading = internet.storageLoading,
                         storageProblem = internet.storageError != null,
@@ -250,7 +261,16 @@ fun RelayHome(
                         discover = { goTab(1) },
                         pinned = pinned,
                         togglePin = togglePin,
-                        deleteChat = deleteChat
+                        deleteChat = deleteChat,
+                        refreshing = refreshing,
+                        onRefresh = {
+                            scope.launch {
+                                refreshing = true
+                                refreshedAt = System.currentTimeMillis()
+                                delay(1_000)
+                                refreshing = false
+                            }
+                        }
                     )
                     tab == 1 -> RelayDiscoverPage(
                         mesh = mesh,

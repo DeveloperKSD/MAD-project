@@ -35,9 +35,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,6 +62,7 @@ import `in`.yashd.bitchat.mesh.MessageStatus
 import `in`.yashd.bitchat.ui.relay.RelayUiState
 import `in`.yashd.bitchat.ui.relay.RelayViewModel
 import `in`.yashd.bitchat.ui.relay.sendNearbySafely
+import kotlinx.coroutines.launch
 
 // ---------------------------------------------------------------------------
 // Conversation screen (Figma 2). Works for Nearby (Bluetooth) and Internet chats.
@@ -162,7 +165,9 @@ internal fun RelayChatScreen(
     deleteInternetMessage: (String) -> Unit = {},
     pinned: Boolean = false,
     togglePin: () -> Unit = {},
-    deleteChat: () -> Unit = {}
+    deleteChat: () -> Unit = {},
+    pinnedMessages: List<String> = emptyList(),
+    togglePinMessage: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     // Draft stays in memory only (saved state is not encrypted storage).
@@ -172,6 +177,10 @@ internal fun RelayChatScreen(
     val rows = withDays(bubbles, now)
     val lastMineId = bubbles.lastOrNull { it.mine }?.id
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    // Only pins whose message is still in this thread are shown (deleted messages drop out by themselves).
+    val pinnedBubbles = pinnedMessages.mapNotNull { id -> bubbles.firstOrNull { it.id == id } }
+    var pinCursor by remember(info.route) { mutableIntStateOf(0) }
 
     var openedRoute by remember { mutableStateOf<String?>(null) }
     val layout = listState.layoutInfo
@@ -236,6 +245,21 @@ internal fun RelayChatScreen(
             }
         }
 
+        if (pinnedBubbles.isNotEmpty()) {
+            val shown = pinnedBubbles[pinCursor.coerceIn(0, pinnedBubbles.lastIndex)]
+            PinnedBanner(
+                count = pinnedBubbles.size,
+                index = pinCursor.coerceIn(0, pinnedBubbles.lastIndex),
+                text = shown.body,
+                onClick = {
+                    val at = rows.indexOfFirst { it is ThreadRow.Message && it.bubble.id == shown.id }
+                    if (at >= 0) scope.launch { listState.animateScrollToItem(at) }
+                    pinCursor = (pinCursor + 1) % pinnedBubbles.size
+                },
+                onUnpin = { togglePinMessage(shown.id); toast("Message unpinned") }
+            )
+        }
+
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (rows.isEmpty()) {
                 Column(
@@ -274,6 +298,11 @@ internal fun RelayChatScreen(
                                 b = row.bubble,
                                 nearby = info.nearby,
                                 showStatus = row.bubble.failed || row.bubble.id == lastMineId,
+                                pinned = row.bubble.id in pinnedMessages,
+                                onTogglePin = {
+                                    togglePinMessage(row.bubble.id)
+                                    toast(if (row.bubble.id in pinnedMessages) "Message unpinned" else "Message pinned")
+                                },
                                 onCopy = { copyText(context, "Relay message", row.bubble.body); toast("Message copied") },
                                 onRetry = { retry(row.bubble) },
                                 onDelete = {
@@ -281,6 +310,7 @@ internal fun RelayChatScreen(
                                         toast("Wait until this message finishes sending.")
                                     } else {
                                         if (info.nearby) MeshRuntime.deleteMessage(row.bubble.id) else deleteInternetMessage(row.bubble.id)
+                                        if (row.bubble.id in pinnedMessages) togglePinMessage(row.bubble.id)
                                         toast("Message deleted")
                                     }
                                 }
@@ -356,6 +386,32 @@ private fun ChatTopBar(
     }
 }
 
+/** Bar under the chat header showing a pinned message. Tap to jump to it (and to the next pin if there are several). */
+@Composable
+private fun PinnedBanner(count: Int, index: Int, text: String, onClick: () -> Unit, onUnpin: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(RelayColors.Card)
+            .clickable(onClick = onClick)
+            .padding(start = 14.dp, top = 6.dp, bottom = 6.dp, end = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RIcon(R.drawable.relay_pin, null, tint = RelayColors.Blue, size = 16.dp)
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(
+                if (count > 1) "Pinned message ${index + 1} of $count" else "Pinned message",
+                color = RelayColors.Blue, fontSize = 11.sp, fontWeight = FontWeight.SemiBold
+            )
+            Text(text, color = RelayColors.TextPrimary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        TextButton(onClick = onUnpin) { Text("Unpin", color = RelayColors.TextSecondary, fontSize = 12.sp) }
+    }
+}
+
 @Composable
 private fun Notice(text: String, action: String? = null, onAction: () -> Unit = {}) {
     Row(
@@ -375,7 +431,7 @@ private fun Notice(text: String, action: String? = null, onAction: () -> Unit = 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubbleView(
-    b: BubbleUi, nearby: Boolean, showStatus: Boolean,
+    b: BubbleUi, nearby: Boolean, showStatus: Boolean, pinned: Boolean, onTogglePin: () -> Unit,
     onCopy: () -> Unit, onRetry: () -> Unit, onDelete: () -> Unit
 ) {
     var menu by remember { mutableStateOf(false) }
@@ -419,6 +475,7 @@ private fun MessageBubbleView(
             Text(b.body, color = RelayColors.TextPrimary, fontSize = 15.sp)
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text("Copy") }, onClick = { menu = false; onCopy() })
+                DropdownMenuItem(text = { Text(if (pinned) "Unpin message" else "Pin message") }, onClick = { menu = false; onTogglePin() })
                 DropdownMenuItem(text = { Text("Delete", color = RelayColors.Red) }, onClick = { menu = false; confirmDelete = true })
             }
         }
@@ -427,6 +484,7 @@ private fun MessageBubbleView(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            if (pinned) RIcon(R.drawable.relay_pin, "Pinned message", tint = RelayColors.TextMuted, size = 12.dp)
             if (b.atMs > 0) Text(clockTime(b.atMs), color = RelayColors.TextMuted, fontSize = 11.sp)
             if (b.ticks == 2) RIcon(R.drawable.relay_check_double, "Delivered", tint = RelayColors.Bluetooth, size = 15.dp)
             if (b.ticks == 1) RIcon(R.drawable.relay_check, "Sent", tint = RelayColors.TextSecondary, size = 15.dp)

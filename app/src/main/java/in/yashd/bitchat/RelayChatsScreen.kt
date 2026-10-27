@@ -27,6 +27,10 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -220,6 +224,7 @@ internal fun buildChatList(
 
 private val chatFilters = listOf("All", "Nearby", "Internet", "Offline", "Favorites")
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun RelayChatsScreen(
     items: List<ChatListItem>,
@@ -234,7 +239,9 @@ internal fun RelayChatsScreen(
     discover: () -> Unit,
     pinned: List<String> = emptyList(),
     togglePin: (String) -> Unit = {},
-    deleteChat: (String) -> Unit = {}
+    deleteChat: (String) -> Unit = {},
+    refreshing: Boolean = false,
+    onRefresh: () -> Unit = {}
 ) {
     // Search text can contain private names, so it is kept in memory only.
     var search by remember { mutableStateOf("") }
@@ -264,41 +271,58 @@ internal fun RelayChatsScreen(
             onDismiss = { confirmRoute = null }
         )
     }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
-        item { RelayHeader("Relay", myName, onAvatar) }
-        item { RelaySearchField(search, { search = it }, "Find your friends") }
-        item { FilterChipsRow(filter, { filter = it }, newChat) }
-        if (visible.isEmpty()) {
-            item {
-                Box(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
-                    when {
-                        loading -> EmptyCard(R.drawable.relay_clock, "Loading your chats…", "Saved Internet chats are being opened securely.")
-                        storageProblem && items.isEmpty() -> EmptyCard(R.drawable.relay_info, "Saved Internet chats are unavailable",
-                            "Your history wasn't deleted. Nearby chats still work.")
-                        query.isNotEmpty() || filter != "All" -> EmptyCard(R.drawable.relay_search, "No chats found",
-                            "Try another name or filter.")
-                        else -> EmptyCard(R.drawable.relay_chat, "No chats yet",
-                            "Find people around you in Discover, or tap + to message a friend online.") {
-                            TextButton(onClick = discover) { Text("Find people nearby", color = RelayColors.Blue) }
+    val refreshState = rememberPullToRefreshState()
+    PullToRefreshBox(
+        isRefreshing = refreshing,
+        onRefresh = onRefresh,
+        modifier = Modifier.fillMaxSize(),
+        state = refreshState,
+        indicator = {
+            PullToRefreshDefaults.Indicator(
+                state = refreshState,
+                isRefreshing = refreshing,
+                modifier = Modifier.align(Alignment.TopCenter),
+                containerColor = RelayColors.CardHigh,
+                color = RelayColors.Blue
+            )
+        }
+    ) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+            item { RelayHeader("Relay", myName, onAvatar) }
+            item { RelaySearchField(search, { search = it }, "Find your friends") }
+            item { FilterChipsRow(filter, { filter = it }, newChat) }
+            if (visible.isEmpty()) {
+                item {
+                    Box(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
+                        when {
+                            loading -> EmptyCard(R.drawable.relay_clock, "Loading your chats…", "Saved Internet chats are being opened securely.")
+                            storageProblem && items.isEmpty() -> EmptyCard(R.drawable.relay_info, "Saved Internet chats are unavailable",
+                                "Your history wasn't deleted. Nearby chats still work.")
+                            query.isNotEmpty() || filter != "All" -> EmptyCard(R.drawable.relay_search, "No chats found",
+                                "Try another name or filter.")
+                            else -> EmptyCard(R.drawable.relay_chat, "No chats yet",
+                                "Find people around you in Discover, or tap + to message a friend online.") {
+                                TextButton(onClick = discover) { Text("Find people nearby", color = RelayColors.Blue) }
+                            }
                         }
                     }
                 }
             }
-        }
-        items(visible, key = { it.info.route }) { item ->
-            val route = item.info.route
-            val isPinned = route in pinned
-            Box {
-                ChatListRow(item, now, isPinned, onClick = { openChat(route) }, onLongClick = { menuRoute = route })
-                DropdownMenu(expanded = menuRoute == route, onDismissRequest = { menuRoute = null }) {
-                    DropdownMenuItem(
-                        text = { Text(if (isPinned) "Unpin chat" else "Pin chat") },
-                        onClick = { menuRoute = null; togglePin(route) }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Delete chat", color = RelayColors.Red) },
-                        onClick = { menuRoute = null; confirmRoute = route }
-                    )
+            items(visible, key = { it.info.route }) { item ->
+                val route = item.info.route
+                val isPinned = route in pinned
+                Box {
+                    ChatListRow(item, now, isPinned, onClick = { openChat(route) }, onLongClick = { menuRoute = route })
+                    DropdownMenu(expanded = menuRoute == route, onDismissRequest = { menuRoute = null }) {
+                        DropdownMenuItem(
+                            text = { Text(if (isPinned) "Unpin chat" else "Pin chat") },
+                            onClick = { menuRoute = null; togglePin(route) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete chat", color = RelayColors.Red) },
+                            onClick = { menuRoute = null; confirmRoute = route }
+                        )
+                    }
                 }
             }
         }
