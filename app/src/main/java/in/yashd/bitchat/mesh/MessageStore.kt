@@ -72,6 +72,22 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
         }
     }
 
+    /** Removes one message from this phone only. */
+    fun deleteMessage(messageId: String) = remove { it.messageId == messageId }
+
+    /** Removes a whole Nearby chat from this phone: one private peer, or the public group when [peerId] is null. */
+    fun deleteConversation(peerId: String?) = remove { message ->
+        if (peerId == null) !message.isPrivate && message.recipientId == null
+        else message.isPrivate && (message.senderId == peerId || message.recipientId == peerId)
+    }
+
+    private fun remove(matches: (ChatMessage) -> Boolean) {
+        check(!storageError) { "Nearby history is unavailable; existing data preserved" }
+        if (!messages.values.removeAll(matches)) return
+        try { save() } catch (e: Exception) { storageError = true; throw e }
+        publish()
+    }
+
     private fun put(message: ChatMessage) {
         check(!storageError) { "Nearby history is unavailable; existing data preserved" }
         messages[message.messageId] = message

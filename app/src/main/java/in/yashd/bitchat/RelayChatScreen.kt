@@ -158,7 +158,11 @@ internal fun RelayChatScreen(
     markSeen: () -> Unit,
     toast: (String) -> Unit,
     olderMessages: () -> Unit = {},
-    latestMessages: () -> Unit = {}
+    latestMessages: () -> Unit = {},
+    deleteInternetMessage: (String) -> Unit = {},
+    pinned: Boolean = false,
+    togglePin: () -> Unit = {},
+    deleteChat: () -> Unit = {}
 ) {
     val context = LocalContext.current
     // Draft stays in memory only (saved state is not encrypted storage).
@@ -215,7 +219,7 @@ internal fun RelayChatScreen(
     }
 
     Column(Modifier.fillMaxSize()) {
-        ChatTopBar(info, back, openProfile, toast) { copyText(context, "Relay ID", info.publicId); toast("ID copied") }
+        ChatTopBar(info, back, openProfile, toast, pinned, togglePin, deleteChat) { copyText(context, "Relay ID", info.publicId); toast("ID copied") }
 
         // Short notes the old screens showed, kept so nothing important is lost.
         when {
@@ -271,7 +275,15 @@ internal fun RelayChatScreen(
                                 nearby = info.nearby,
                                 showStatus = row.bubble.failed || row.bubble.id == lastMineId,
                                 onCopy = { copyText(context, "Relay message", row.bubble.body); toast("Message copied") },
-                                onRetry = { retry(row.bubble) }
+                                onRetry = { retry(row.bubble) },
+                                onDelete = {
+                                    if (!info.nearby && row.bubble.pending) {
+                                        toast("Wait until this message finishes sending.")
+                                    } else {
+                                        if (info.nearby) MeshRuntime.deleteMessage(row.bubble.id) else deleteInternetMessage(row.bubble.id)
+                                        toast("Message deleted")
+                                    }
+                                }
                             )
                         }
                     }
@@ -291,8 +303,21 @@ internal fun RelayChatScreen(
 }
 
 @Composable
-private fun ChatTopBar(info: RouteInfo, back: () -> Unit, openProfile: () -> Unit, toast: (String) -> Unit, copyId: () -> Unit) {
+private fun ChatTopBar(
+    info: RouteInfo, back: () -> Unit, openProfile: () -> Unit, toast: (String) -> Unit,
+    pinned: Boolean, togglePin: () -> Unit, deleteChat: () -> Unit, copyId: () -> Unit
+) {
     var menu by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    if (confirmDelete) {
+        ConfirmDeleteDialog(
+            title = "Delete chat?",
+            text = "All messages with ${info.title} will be removed from this phone. The other person keeps their copy.",
+            confirmLabel = "Delete chat",
+            onConfirm = { confirmDelete = false; deleteChat() },
+            onDismiss = { confirmDelete = false }
+        )
+    }
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -323,6 +348,8 @@ private fun ChatTopBar(info: RouteInfo, back: () -> Unit, openProfile: () -> Uni
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("View contact") }, onClick = { menu = false; openProfile() })
                     DropdownMenuItem(text = { Text("Copy ID") }, onClick = { menu = false; copyId() })
+                    DropdownMenuItem(text = { Text(if (pinned) "Unpin chat" else "Pin chat") }, onClick = { menu = false; togglePin() })
+                    DropdownMenuItem(text = { Text("Delete chat", color = RelayColors.Red) }, onClick = { menu = false; confirmDelete = true })
                 }
             }
         }
@@ -347,7 +374,21 @@ private fun Notice(text: String, action: String? = null, onAction: () -> Unit = 
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubbleView(b: BubbleUi, nearby: Boolean, showStatus: Boolean, onCopy: () -> Unit, onRetry: () -> Unit) {
+private fun MessageBubbleView(
+    b: BubbleUi, nearby: Boolean, showStatus: Boolean,
+    onCopy: () -> Unit, onRetry: () -> Unit, onDelete: () -> Unit
+) {
+    var menu by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    if (confirmDelete) {
+        ConfirmDeleteDialog(
+            title = "Delete message?",
+            text = "This removes the message from this phone only. The other person keeps their copy.",
+            confirmLabel = "Delete",
+            onConfirm = { confirmDelete = false; onDelete() },
+            onDismiss = { confirmDelete = false }
+        )
+    }
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (b.mine) Alignment.End else Alignment.Start
@@ -372,10 +413,14 @@ private fun MessageBubbleView(b: BubbleUi, nearby: Boolean, showStatus: Boolean,
                         else -> RelayColors.BlueBubble
                     }
                 )
-                .combinedClickable(onClick = { if (b.failed) onRetry() }, onLongClick = onCopy)
+                .combinedClickable(onClick = { if (b.failed) onRetry() }, onLongClick = { menu = true })
                 .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
             Text(b.body, color = RelayColors.TextPrimary, fontSize = 15.sp)
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(text = { Text("Copy") }, onClick = { menu = false; onCopy() })
+                DropdownMenuItem(text = { Text("Delete", color = RelayColors.Red) }, onClick = { menu = false; confirmDelete = true })
+            }
         }
         Row(
             modifier = Modifier.padding(top = 4.dp, start = 4.dp, end = 4.dp),

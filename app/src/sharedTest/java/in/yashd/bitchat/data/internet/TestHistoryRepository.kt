@@ -27,5 +27,10 @@ class TestHistoryRepository : InternetHistoryRepository {
     override suspend fun publication(owner: String, id: String, result: NostrMessagingCoordinator.SendResult) { messages["$owner:$id"] = messages.getValue("$owner:$id").copy(status = publicationStatus(result)) }
     override suspend fun failed(owner: String, id: String, unknown: Boolean) { messages["$owner:$id"] = messages.getValue("$owner:$id").copy(status = if (unknown) HistoryStatus.UNKNOWN else HistoryStatus.FAILED) }
     override suspend fun interruptPending(owner: String) { messages.replaceAll { key, m -> if (key.startsWith("$owner:") && m.status == HistoryStatus.QUEUED) m.copy(status = HistoryStatus.UNKNOWN) else m } }
+    override suspend fun deleteMessage(owner: String, id: String) { messages.remove("$owner:$id") }
+    override suspend fun deleteConversation(owner: String, peer: String) {
+        messages.entries.removeAll { it.key.startsWith("$owner:") && it.value.peer == peer }
+        contacts.remove("$owner:$peer")
+    }
     override suspend fun close() {}
 }

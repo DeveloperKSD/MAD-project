@@ -2,7 +2,7 @@ package `in`.yashd.bitchat.data.internet
 
 import `in`.yashd.bitchat.nostr.NostrMessagingCoordinator
 
-enum class HistoryStatus { QUEUED, RELAY_ACCEPTED, RELAY_REJECTED, FAILED, UNKNOWN, RECEIVED, SENDER_COPY_RECEIVED }
+enum class HistoryStatus { QUEUED, RELAY_ACCEPTED, RELAY_REJECTED, FAILED, UNKNOWN, RECEIVED, SENDER_COPY_RECEIVED, DELETED }
 data class SavedContact(val peer: String, val name: String, val lastMessageAtMs: Long? = null)
 data class SavedMessage(val recordId: String, val rumorId: String?, val peer: String, val body: String,
     val outgoing: Boolean, val createdAtMs: Long, val status: HistoryStatus)
@@ -28,6 +28,10 @@ interface InternetHistoryRepository {
     suspend fun publication(owner: String, id: String, result: NostrMessagingCoordinator.SendResult)
     suspend fun failed(owner: String, id: String, unknown: Boolean)
     suspend fun interruptPending(owner: String)
+    /** Local-only delete. Keeps an empty tombstone so relays that redeliver the message cannot bring it back. */
+    suspend fun deleteMessage(owner: String, id: String)
+    /** Local-only delete of a whole chat: every message is erased and the chat is hidden until new activity. */
+    suspend fun deleteConversation(owner: String, peer: String)
     suspend fun close()
 }
 fun HistoryStatus.label(): String = when (this) {
@@ -38,6 +42,7 @@ fun HistoryStatus.label(): String = when (this) {
     HistoryStatus.UNKNOWN -> "Outcome unknown · delivery unconfirmed"
     HistoryStatus.RECEIVED -> "Received encrypted message"
     HistoryStatus.SENDER_COPY_RECEIVED -> "Received encrypted sender copy · delivery unconfirmed"
+    HistoryStatus.DELETED -> "Deleted"
 }
 fun publicationStatus(result: NostrMessagingCoordinator.SendResult): HistoryStatus = when {
     result.recipient.any { it.stage == NostrMessagingCoordinator.Stage.RELAY_ACCEPTED } -> HistoryStatus.RELAY_ACCEPTED

@@ -157,6 +157,43 @@ class RelayViewModel(private val backend: InternetBackend,
             catch (_: Exception) { mutable.update { it.copy(threadLoading = false) }; storageFailure() }
         }
     }
+    /** Deletes one Internet message from this phone only. */
+    fun deleteMessage(id: String) {
+        scope.launch {
+            val snapshot = state.value
+            if (snapshot.storageLoading || snapshot.storageError != null) return@launch
+            try {
+                historyGate.withLock {
+                    history.deleteMessage(state.value.publicKey, id)
+                    mutable.update { old -> old.copy(
+                        messages = old.messages.filterNot { it.id == id },
+                        thread = old.thread.filterNot { it.id == id }) }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { storageFailure() }
+        }
+    }
+    /** Deletes a whole Internet chat from this phone only. A new message from that person starts it again. */
+    fun deleteConversation(npub: String) {
+        val peer = runCatching { recipientKey(npub) }.getOrNull() ?: return
+        scope.launch {
+            val snapshot = state.value
+            if (snapshot.storageLoading || snapshot.storageError != null) return@launch
+            try {
+                historyGate.withLock {
+                    history.deleteConversation(state.value.publicKey, peer)
+                    mutable.update { old -> old.copy(
+                        conversations = old.conversations.filterNot { it.publicKey == peer },
+                        messages = old.messages.filterNot { it.peer == peer },
+                        threadPeer = if (old.threadPeer == peer) null else old.threadPeer,
+                        thread = if (old.threadPeer == peer) emptyList() else old.thread,
+                        threadLoading = if (old.threadPeer == peer) false else old.threadLoading,
+                        threadHasOlder = if (old.threadPeer == peer) false else old.threadHasOlder) }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { storageFailure() }
+        }
+    }
     private suspend fun store(id: String? = null, peer: String? = null, action: suspend (String) -> Unit): Boolean {
         if (state.value.storageError != null || state.value.storageLoading) return false
         return try {

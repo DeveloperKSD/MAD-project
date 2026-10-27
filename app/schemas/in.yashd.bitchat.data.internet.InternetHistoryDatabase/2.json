@@ -1,0 +1,308 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "3397b57eb1f6e7e7b1f9fdccaf91d13e",
+    "entities": [
+      {
+        "tableName": "contacts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`owner` TEXT NOT NULL, `peer` TEXT NOT NULL, `encryptedName` BLOB NOT NULL, `createdAtMs` INTEGER NOT NULL, PRIMARY KEY(`owner`, `peer`))",
+        "fields": [
+          {
+            "fieldPath": "owner",
+            "columnName": "owner",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peer",
+            "columnName": "peer",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "encryptedName",
+            "columnName": "encryptedName",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtMs",
+            "columnName": "createdAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "owner",
+            "peer"
+          ]
+        }
+      },
+      {
+        "tableName": "conversations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`owner` TEXT NOT NULL, `peer` TEXT NOT NULL, `transport` TEXT NOT NULL, `updatedAtMs` INTEGER NOT NULL, `hidden` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`owner`, `peer`), FOREIGN KEY(`owner`, `peer`) REFERENCES `contacts`(`owner`, `peer`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "owner",
+            "columnName": "owner",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peer",
+            "columnName": "peer",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transport",
+            "columnName": "transport",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "hidden",
+            "columnName": "hidden",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "owner",
+            "peer"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "contacts",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "owner",
+              "peer"
+            ],
+            "referencedColumns": [
+              "owner",
+              "peer"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "messages",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`owner` TEXT NOT NULL, `recordId` TEXT NOT NULL, `rumorId` TEXT, `peer` TEXT NOT NULL, `encryptedBody` BLOB NOT NULL, `outgoing` INTEGER NOT NULL, `createdAtMs` INTEGER NOT NULL, `status` TEXT NOT NULL, `transport` TEXT NOT NULL, PRIMARY KEY(`owner`, `recordId`), FOREIGN KEY(`owner`, `peer`) REFERENCES `conversations`(`owner`, `peer`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "owner",
+            "columnName": "owner",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recordId",
+            "columnName": "recordId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rumorId",
+            "columnName": "rumorId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "peer",
+            "columnName": "peer",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "encryptedBody",
+            "columnName": "encryptedBody",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outgoing",
+            "columnName": "outgoing",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtMs",
+            "columnName": "createdAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transport",
+            "columnName": "transport",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "owner",
+            "recordId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_messages_owner_rumorId",
+            "unique": true,
+            "columnNames": [
+              "owner",
+              "rumorId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_messages_owner_rumorId` ON `${TABLE_NAME}` (`owner`, `rumorId`)"
+          },
+          {
+            "name": "index_messages_owner_peer",
+            "unique": false,
+            "columnNames": [
+              "owner",
+              "peer"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_owner_peer` ON `${TABLE_NAME}` (`owner`, `peer`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "conversations",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "owner",
+              "peer"
+            ],
+            "referencedColumns": [
+              "owner",
+              "peer"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "publications",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`owner` TEXT NOT NULL, `recordId` TEXT NOT NULL, `target` TEXT NOT NULL, `position` INTEGER NOT NULL, `eventId` TEXT NOT NULL, `encryptedRelay` BLOB NOT NULL, `stage` TEXT NOT NULL, PRIMARY KEY(`owner`, `recordId`, `target`, `position`), FOREIGN KEY(`owner`, `recordId`) REFERENCES `messages`(`owner`, `recordId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "owner",
+            "columnName": "owner",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recordId",
+            "columnName": "recordId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "target",
+            "columnName": "target",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "position",
+            "columnName": "position",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "encryptedRelay",
+            "columnName": "encryptedRelay",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stage",
+            "columnName": "stage",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "owner",
+            "recordId",
+            "target",
+            "position"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "messages",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "owner",
+              "recordId"
+            ],
+            "referencedColumns": [
+              "owner",
+              "recordId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "storage_metadata",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `keyCheck` BLOB NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "keyCheck",
+            "columnName": "keyCheck",
+            "affinity": "BLOB",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '3397b57eb1f6e7e7b1f9fdccaf91d13e')"
+    ]
+  }
+}

@@ -44,13 +44,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import `in`.yashd.bitchat.mesh.MeshRuntime
 import `in`.yashd.bitchat.mesh.MeshUiState
 import `in`.yashd.bitchat.ui.relay.InternetSetupScreen
 import `in`.yashd.bitchat.ui.relay.OnlineChatScreen
+import `in`.yashd.bitchat.ui.relay.PinnedChatsStore
 import `in`.yashd.bitchat.ui.relay.RelayViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -91,6 +94,10 @@ fun RelayHome(
     val favorites = remember { mutableStateListOf<String>() }
     val muted = remember { mutableStateListOf<String>() }
     val seenAt = remember { mutableStateMapOf<String, Long>() }
+    // Pinned chats are the one exception: they are saved (encrypted) so they stay pinned after a restart.
+    val context = LocalContext.current
+    val pinStore = remember { PinnedChatsStore(context) }
+    val pinned by pinStore.pinned.collectAsState()
     val sessionStart = remember { System.currentTimeMillis() }
     val now by produceState(System.currentTimeMillis()) {
         while (true) {
@@ -120,6 +127,21 @@ fun RelayHome(
     val openChat: (String) -> Unit = { route ->
         contact = null
         chat = route
+    }
+    val togglePin: (String) -> Unit = { route ->
+        toast(if (pinStore.toggle(route)) "Chat pinned" else "Chat unpinned")
+    }
+    val deleteChat: (String) -> Unit = { route ->
+        val target = routeTarget(route)
+        if (routeIsNearby(route)) MeshRuntime.deleteConversation(target)
+        else if (target != null) model.deleteConversation(target)
+        pinStore.remove(route)
+        favorites.remove(route)
+        muted.remove(route)
+        seenAt.remove(route)
+        if (chat == route) chat = null
+        if (contact == route) contact = null
+        toast("Chat deleted")
     }
     val atRoot = chatRoute == null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails
     val showingChat = chatRoute != null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails
@@ -209,7 +231,11 @@ fun RelayHome(
                         markSeen = { seenAt[chatRoute] = System.currentTimeMillis() },
                         toast = toast,
                         olderMessages = { model.loadConversation(chatRoute.substringAfter(':'), older = true) },
-                        latestMessages = { model.loadConversation(chatRoute.substringAfter(':')) }
+                        latestMessages = { model.loadConversation(chatRoute.substringAfter(':')) },
+                        deleteInternetMessage = model::deleteMessage,
+                        pinned = chatRoute in pinned,
+                        togglePin = { togglePin(chatRoute) },
+                        deleteChat = { deleteChat(chatRoute) }
                     )
                     tab == 0 -> RelayChatsScreen(
                         items = items,
@@ -221,7 +247,10 @@ fun RelayHome(
                         onAvatar = { goTab(2) },
                         openChat = openChat,
                         newChat = { newChat = true },
-                        discover = { goTab(1) }
+                        discover = { goTab(1) },
+                        pinned = pinned,
+                        togglePin = togglePin,
+                        deleteChat = deleteChat
                     )
                     tab == 1 -> RelayDiscoverPage(
                         mesh = mesh,

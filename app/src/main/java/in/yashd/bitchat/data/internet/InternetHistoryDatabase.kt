@@ -1,6 +1,7 @@
 package `in`.yashd.bitchat.data.internet
 
 import androidx.room.*
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
@@ -9,7 +10,8 @@ import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 data class ContactRow(val owner: String, val peer: String, val encryptedName: ByteArray, val createdAtMs: Long)
 @Entity(tableName = "conversations", primaryKeys = ["owner", "peer"], foreignKeys = [
     ForeignKey(entity = ContactRow::class, parentColumns = ["owner", "peer"], childColumns = ["owner", "peer"], onDelete = ForeignKey.RESTRICT)])
-data class ConversationRow(val owner: String, val peer: String, val transport: String = "INTERNET", val updatedAtMs: Long)
+data class ConversationRow(val owner: String, val peer: String, val transport: String = "INTERNET", val updatedAtMs: Long,
+    @ColumnInfo(defaultValue = "0") val hidden: Boolean = false)
 @Entity(tableName = "messages", primaryKeys = ["owner", "recordId"], indices = [Index(value = ["owner", "rumorId"], unique = true), Index(value = ["owner", "peer"])], foreignKeys = [
     ForeignKey(entity = ConversationRow::class, parentColumns = ["owner", "peer"], childColumns = ["owner", "peer"], onDelete = ForeignKey.RESTRICT)])
 data class MessageRow(val owner: String, val recordId: String, val rumorId: String?, val peer: String,
@@ -34,10 +36,10 @@ interface HistoryDao {
     @Query("SELECT * FROM publications WHERE owner = :owner") suspend fun allPublications(owner: String): List<PublicationRow>
     @Query("SELECT * FROM conversations WHERE owner = :owner AND peer = :peer") suspend fun conversation(owner: String, peer: String): ConversationRow?
     @Query("SELECT * FROM messages WHERE owner = :owner ORDER BY createdAtMs, recordId") suspend fun messages(owner: String): List<MessageRow>
-    @Query("SELECT * FROM messages WHERE owner = :owner ORDER BY createdAtMs DESC, recordId DESC LIMIT 200") suspend fun recent(owner: String): List<MessageRow>
-    @Query("SELECT peer, MAX(createdAtMs) AS lastMessageAtMs FROM messages WHERE owner = :owner GROUP BY peer") suspend fun conversationTimes(owner: String): List<ConversationTime>
+    @Query("SELECT * FROM messages WHERE owner = :owner AND status != 'DELETED' ORDER BY createdAtMs DESC, recordId DESC LIMIT 200") suspend fun recent(owner: String): List<MessageRow>
+    @Query("SELECT peer, MAX(createdAtMs) AS lastMessageAtMs FROM messages WHERE owner = :owner AND status != 'DELETED' GROUP BY peer") suspend fun conversationTimes(owner: String): List<ConversationTime>
     @Query("SELECT * FROM messages WHERE owner = :owner AND status = 'QUEUED'") suspend fun pending(owner: String): List<MessageRow>
-    @Query("SELECT * FROM messages WHERE owner = :owner AND peer = :peer AND (:beforeTime IS NULL OR createdAtMs < :beforeTime OR (createdAtMs = :beforeTime AND recordId < :beforeId)) ORDER BY createdAtMs DESC, recordId DESC LIMIT 100")
+    @Query("SELECT * FROM messages WHERE owner = :owner AND peer = :peer AND status != 'DELETED' AND (:beforeTime IS NULL OR createdAtMs < :beforeTime OR (createdAtMs = :beforeTime AND recordId < :beforeId)) ORDER BY createdAtMs DESC, recordId DESC LIMIT 100")
     suspend fun page(owner: String, peer: String, beforeTime: Long?, beforeId: String): List<MessageRow>
     @Query("SELECT * FROM messages WHERE owner = :owner AND recordId = :id") suspend fun message(owner: String, id: String): MessageRow?
     @Query("SELECT * FROM messages WHERE owner = :owner AND rumorId = :rumor") suspend fun rumor(owner: String, rumor: String): MessageRow?
@@ -47,9 +49,19 @@ interface HistoryDao {
     @Query("SELECT * FROM publications WHERE owner = :owner AND recordId = :id ORDER BY target, position") suspend fun publications(owner: String, id: String): List<PublicationRow>
     @Query("SELECT * FROM publications WHERE owner = :owner AND recordId IN (:ids)") suspend fun publicationsForMessages(owner: String, ids: List<String>): List<PublicationRow>
     @Insert suspend fun insert(values: List<PublicationRow>)
+    @Query("SELECT * FROM messages WHERE owner = :owner AND peer = :peer AND status != 'DELETED'") suspend fun liveMessages(owner: String, peer: String): List<MessageRow>
+    @Query("DELETE FROM publications WHERE owner = :owner AND recordId = :id") suspend fun deletePublications(owner: String, id: String)
+    @Query("UPDATE conversations SET hidden = :hidden WHERE owner = :owner AND peer = :peer") suspend fun setHidden(owner: String, peer: String, hidden: Boolean)
 }
-@Database(entities = [ContactRow::class, ConversationRow::class, MessageRow::class, PublicationRow::class, StorageMetadata::class], version = 1, exportSchema = true)
+@Database(entities = [ContactRow::class, ConversationRow::class, MessageRow::class, PublicationRow::class, StorageMetadata::class], version = 2, exportSchema = true)
 abstract class InternetHistoryDatabase : RoomDatabase() { abstract fun history(): HistoryDao }
+
+/** Version 2 adds the "hidden" flag used by Delete chat. Existing rows keep working unchanged. */
+internal val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE conversations ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+    }
+}
 
 /** SQLite's default corruption callback deletes files. Preserve them for every failure instead. */
 internal class PreserveHistoryOpenHelperFactory : SupportSQLiteOpenHelper.Factory {

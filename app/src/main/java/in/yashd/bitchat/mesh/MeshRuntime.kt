@@ -174,6 +174,19 @@ object MeshRuntime {
         if (!accepted) addError("No Nearby link accepted the message. Turn on Nearby and retry.")
     }
 
+    fun deleteMessage(messageId: String) = scope.launch {
+        if (!::messageStore.isInitialized) return@launch
+        runCatching { messageStore.deleteMessage(messageId) }
+            .onFailure { addError("Couldn't delete the message; existing data was preserved.") }
+    }
+
+    /** [peerId] null means the public Nearby group. */
+    fun deleteConversation(peerId: String?) = scope.launch {
+        if (!::messageStore.isInitialized) return@launch
+        runCatching { messageStore.deleteConversation(peerId) }
+            .onFailure { addError("Couldn't delete the chat; existing data was preserved.") }
+    }
+
     private fun loadIdentity(displayName: String): LocalIdentity {
         val identity = identityManager.loadOrCreate { displayName }
         localIdentity = identity

@@ -31,7 +31,7 @@ class RoomInternetHistoryRepository(
         check(existed == cipher.exists() && (existed || !fragments))
         if (!existed) cipher.create()
         val opened = Room.databaseBuilder(context, InternetHistoryDatabase::class.java, file.absolutePath)
-            .openHelperFactory(PreserveHistoryOpenHelperFactory()).build()
+            .openHelperFactory(PreserveHistoryOpenHelperFactory()).addMigrations(MIGRATION_1_2).build()
         database = opened
         if (!existed) opened.history().metadata(StorageMetadata(keyCheck = cipher.encrypt(CHECK, "storage-check")))
         verify(opened)
@@ -51,11 +51,13 @@ class RoomInternetHistoryRepository(
     override suspend fun load(owner: String): HistorySnapshot = access { db, dao ->
         validateKey(owner)
         db.withTransaction {
-            dao.conversations(owner).forEach { check(it.transport == "INTERNET") }
+            val conversations = dao.conversations(owner)
+            conversations.forEach { check(it.transport == "INTERNET") }
+            val hidden = conversations.filter { it.hidden }.map { it.peer }.toSet()
             val rows = dao.recent(owner).asReversed()
             val times = dao.conversationTimes(owner).associate { it.peer to it.lastMessageAtMs }
             validatePublications(dao.publicationsForMessages(owner, rows.map { it.recordId }))
-            HistorySnapshot(dao.contacts(owner).map {
+            HistorySnapshot(dao.contacts(owner).filter { it.peer !in hidden }.map {
                 SavedContact(it.peer, cipher.decrypt(it.encryptedName, nameBinding(owner, it.peer)), times[it.peer])
             }, rows.map(::saved))
         }
@@ -63,9 +65,13 @@ class RoomInternetHistoryRepository(
     override suspend fun changes(owner: String, id: String?, peer: String?): HistorySnapshot = access { db, dao ->
         validateKey(owner)
         db.withTransaction {
-            val row = id?.let { dao.message(owner, it) ?: dao.rumor(owner, it) }
+            val found = id?.let { dao.message(owner, it) ?: dao.rumor(owner, it) }
+            // A deleted message must never be shown again, even when a relay redelivers it.
+            val row = found?.takeIf { it.status != HistoryStatus.DELETED.name }
             if (row != null) validatePublications(dao.publications(owner, row.recordId))
-            val contact = (peer ?: row?.peer)?.let { dao.contact(owner, it) }
+            val contact = (peer ?: found?.peer)?.let { who ->
+                dao.contact(owner, who)?.takeIf { dao.conversation(owner, who)?.hidden != true }
+            }
             HistorySnapshot(contact?.let { listOf(SavedContact(it.peer, cipher.decrypt(it.encryptedName, nameBinding(owner, it.peer)), row?.createdAtMs)) }.orEmpty(),
                 row?.let { listOf(saved(it)) }.orEmpty())
         }
@@ -119,7 +125,8 @@ class RoomInternetHistoryRepository(
             val duplicate = dao.rumor(owner, rumorId)
             if (duplicate != null && duplicate.recordId != id) {
                 // Only remove a proven duplicate of the same authenticated rumor, never damaged data.
-                check(duplicate.peer == local.peer && duplicate.outgoing == local.outgoing && body(duplicate) == body(local))
+                check(duplicate.peer == local.peer && duplicate.outgoing == local.outgoing &&
+                    (duplicate.status == HistoryStatus.DELETED.name || body(duplicate) == body(local)))
                 val previousPublications = dao.publications(owner, duplicate.recordId).map { p ->
                     val relay = cipher.decrypt(p.encryptedRelay, publicationBinding(p))
                     val moved = p.copy(recordId = id)
@@ -129,8 +136,9 @@ class RoomInternetHistoryRepository(
                 dao.insert(previousPublications)
             }
             check(local.rumorId == null || local.rumorId == rumorId)
+            val duplicateStatus = duplicate?.status
             val updated = local.copy(rumorId = rumorId,
-                status = if (duplicate?.status == HistoryStatus.RELAY_ACCEPTED.name) duplicate.status else local.status)
+                status = if (duplicateStatus == HistoryStatus.RELAY_ACCEPTED.name || duplicateStatus == HistoryStatus.DELETED.name) (duplicateStatus ?: local.status) else local.status)
             dao.update(seal(updated, body(local)))
         }
     }
@@ -139,7 +147,8 @@ class RoomInternetHistoryRepository(
         db.withTransaction {
             val existing = dao.rumor(owner, rumorId)
             if (existing != null) {
-                check(existing.peer == peer && existing.outgoing == outgoing && body(existing) == body)
+                // A deleted message stays deleted when a relay sends it again.
+                if (existing.status != HistoryStatus.DELETED.name) check(existing.peer == peer && existing.outgoing == outgoing && body(existing) == body)
                 // A sender copy proves neither recipient delivery nor relay publication acceptance.
             } else {
                 ensureConversation(dao, owner, peer, "", time)
@@ -152,6 +161,7 @@ class RoomInternetHistoryRepository(
     override suspend fun publication(owner: String, id: String, result: NostrMessagingCoordinator.SendResult) = access { db, dao ->
         db.withTransaction {
             val row = requireNotNull(dao.message(owner, id))
+            if (row.status == HistoryStatus.DELETED.name) return@withTransaction
             val content = body(row)
             val updated = row.copy(status = if (row.status == HistoryStatus.RELAY_ACCEPTED.name) row.status else publicationStatus(result).name)
             dao.update(seal(updated, content))
@@ -168,6 +178,7 @@ class RoomInternetHistoryRepository(
     override suspend fun failed(owner: String, id: String, unknown: Boolean) = access { db, dao ->
         db.withTransaction {
             val row = requireNotNull(dao.message(owner, id))
+            if (row.status == HistoryStatus.DELETED.name) return@withTransaction
             val content = body(row)
             val updated = row.copy(status = if (row.status == HistoryStatus.RELAY_ACCEPTED.name) row.status else (if (unknown) HistoryStatus.UNKNOWN else HistoryStatus.FAILED).name)
             dao.update(seal(updated, content))
@@ -181,6 +192,30 @@ class RoomInternetHistoryRepository(
                 dao.update(seal(row.copy(status = HistoryStatus.UNKNOWN.name), content))
             }
         }
+    }
+    override suspend fun deleteMessage(owner: String, id: String) = access { db, dao ->
+        validateKey(owner)
+        db.withTransaction {
+            val row = dao.message(owner, id) ?: dao.rumor(owner, id)
+            if (row != null) erase(dao, row)
+            Unit
+        }
+    }
+    override suspend fun deleteConversation(owner: String, peer: String) = access { db, dao ->
+        validateKey(owner); validateKey(peer)
+        db.withTransaction {
+            dao.liveMessages(owner, peer).forEach { erase(dao, it) }
+            val contact = dao.contact(owner, peer)
+            if (contact != null) dao.put(contact.copy(encryptedName = cipher.encrypt("", nameBinding(owner, peer))))
+            if (dao.conversation(owner, peer) != null) dao.setHidden(owner, peer, true)
+            Unit
+        }
+    }
+    /** Wipes the text and relay details but keeps the row, so a redelivered copy is recognised and ignored. */
+    private suspend fun erase(dao: HistoryDao, row: MessageRow) {
+        if (row.status == HistoryStatus.DELETED.name) return
+        dao.deletePublications(row.owner, row.recordId)
+        dao.update(seal(row.copy(status = HistoryStatus.DELETED.name), ""))
     }
     override suspend fun close() = withContext(Dispatchers.IO) {
         gate.withLock { closed = true; database?.close(); database = null }

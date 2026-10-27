@@ -1,8 +1,10 @@
 package `in`.yashd.bitchat
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +24,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -226,7 +231,10 @@ internal fun RelayChatsScreen(
     onAvatar: () -> Unit,
     openChat: (String) -> Unit,
     newChat: () -> Unit,
-    discover: () -> Unit
+    discover: () -> Unit,
+    pinned: List<String> = emptyList(),
+    togglePin: (String) -> Unit = {},
+    deleteChat: (String) -> Unit = {}
 ) {
     // Search text can contain private names, so it is kept in memory only.
     var search by remember { mutableStateOf("") }
@@ -242,6 +250,19 @@ internal fun RelayChatsScreen(
             "Favorites" -> item.info.route in favorites
             else -> true
         }
+    }.sortedByDescending { it.info.route in pinned } // stable: pinned chats first, newest first inside each group
+    // Which row's menu is open, and which chat is waiting for delete confirmation.
+    var menuRoute by remember { mutableStateOf<String?>(null) }
+    var confirmRoute by remember { mutableStateOf<String?>(null) }
+    confirmRoute?.let { route ->
+        val name = items.firstOrNull { it.info.route == route }?.info?.title ?: "this chat"
+        ConfirmDeleteDialog(
+            title = "Delete chat?",
+            text = "All messages with $name will be removed from this phone. The other person keeps their copy.",
+            confirmLabel = "Delete chat",
+            onConfirm = { confirmRoute = null; deleteChat(route) },
+            onDismiss = { confirmRoute = null }
+        )
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
         item { RelayHeader("Relay", myName, onAvatar) }
@@ -265,7 +286,21 @@ internal fun RelayChatsScreen(
             }
         }
         items(visible, key = { it.info.route }) { item ->
-            ChatListRow(item, now) { openChat(item.info.route) }
+            val route = item.info.route
+            val isPinned = route in pinned
+            Box {
+                ChatListRow(item, now, isPinned, onClick = { openChat(route) }, onLongClick = { menuRoute = route })
+                DropdownMenu(expanded = menuRoute == route, onDismissRequest = { menuRoute = null }) {
+                    DropdownMenuItem(
+                        text = { Text(if (isPinned) "Unpin chat" else "Pin chat") },
+                        onClick = { menuRoute = null; togglePin(route) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete chat", color = RelayColors.Red) },
+                        onClick = { menuRoute = null; confirmRoute = route }
+                    )
+                }
+            }
         }
     }
 }
@@ -334,13 +369,14 @@ private fun FilterChipsRow(selected: String, onSelect: (String) -> Unit, onPlus:
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatListRow(item: ChatListItem, now: Long, onClick: () -> Unit) {
+private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
     val info = item.info
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -357,6 +393,10 @@ private fun ChatListRow(item: ChatListItem, now: Long, onClick: () -> Unit) {
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (pinned) {
+                    RIcon(R.drawable.relay_pin, "Pinned", tint = RelayColors.TextSecondary, size = 14.dp)
+                    Spacer(Modifier.width(6.dp))
+                }
                 Text(item.lastAtMs?.let { listTime(it, now) } ?: "", color = RelayColors.TextSecondary, fontSize = 12.sp)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -436,4 +476,25 @@ internal fun ConversationAvatar(info: RouteInfo, sizeDp: Int) {
     } else {
         PersonAvatar(info.title, sizeDp.dp)
     }
+}
+
+/** Shared "are you sure?" box for deleting a message or a chat. */
+@Composable
+internal fun ConfirmDeleteDialog(
+    title: String,
+    text: String,
+    confirmLabel: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = RelayColors.Card,
+        titleContentColor = RelayColors.TextPrimary,
+        textContentColor = RelayColors.TextSecondary,
+        title = { Text(title) },
+        text = { Text(text) },
+        confirmButton = { TextButton(onClick = onConfirm) { Text(confirmLabel, color = RelayColors.Red) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = RelayColors.TextPrimary) } }
+    )
 }
