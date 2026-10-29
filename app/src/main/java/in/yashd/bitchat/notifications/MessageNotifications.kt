@@ -13,7 +13,7 @@ import `in`.yashd.bitchat.MainActivity
 import `in`.yashd.bitchat.R
 import `in`.yashd.bitchat.ui.relay.MutedChatsStore
 
-/** Process-wide visibility is cleared whenever the activity leaves the foreground. */
+/** Process-wide visibility follows the application foreground lifecycle. */
 object MessageNotifications {
     @Volatile var visibleRoute: String? = null
     @Volatile var foreground = false

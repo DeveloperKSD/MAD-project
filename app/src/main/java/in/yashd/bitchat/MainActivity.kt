@@ -66,28 +66,9 @@ class MainActivity : ComponentActivity() {
             override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
                 @Suppress("UNCHECKED_CAST")
                 return `in`.yashd.bitchat.ui.relay.RelayViewModel(
-                    `in`.yashd.bitchat.ui.relay.AndroidInternetBackend(
-                        `in`.yashd.bitchat.nostr.NostrIdentityManager(applicationContext)),
-                    history = `in`.yashd.bitchat.data.internet.RoomInternetHistoryRepository(applicationContext),
-                    configurationStore = `in`.yashd.bitchat.data.internet.EncryptedInternetConfigurationStore(applicationContext),
-                    onIncomingStored = { owner, peer, name ->
-                        val npub = `in`.yashd.bitchat.nostr.NostrNpub.encode(peer.chunked(2).map { it.toInt(16).toByte() }.toByteArray())
-                        `in`.yashd.bitchat.notifications.MessageNotifications.stored(applicationContext,
-                            `in`.yashd.bitchat.ui.relay.MutedChatsStore.key("internet", owner, peer), internetRoute(npub), name.ifBlank { "Internet conversation" })
-                    }) as T
+                    (application as RelayApplication).internetRuntime) as T
             }
         })[`in`.yashd.bitchat.ui.relay.RelayViewModel::class.java]
-    }
-
-    override fun onStart() {
-        super.onStart()
-        internetModel.start()
-    }
-
-    override fun onStop() {
-        `in`.yashd.bitchat.notifications.MessageNotifications.foreground = false
-        internetModel.stop()
-        super.onStop()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -112,7 +93,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        `in`.yashd.bitchat.notifications.MessageNotifications.foreground = true
         // e.g. after the user turns Bluetooth on in system settings
         MeshRuntime.refreshReadiness()
     }
