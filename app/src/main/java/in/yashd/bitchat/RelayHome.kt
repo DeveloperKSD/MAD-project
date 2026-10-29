@@ -74,6 +74,8 @@ fun RelayHome(
     stopNearby: () -> Unit,
     requestPermissions: () -> Unit,
     bluetoothSettings: () -> Unit,
+    notificationRoute: String? = null,
+    notificationConsumed: () -> Unit = {},
     nearbySettings: LazyListScope.() -> Unit = {}
 ) {
     val internet by model.state.collectAsState()
@@ -93,8 +95,10 @@ fun RelayHome(
     var setupOpen by rememberSaveable { mutableStateOf(false) }
     var nearbyDetails by rememberSaveable { mutableStateOf(false) }
     var newChat by remember { mutableStateOf(false) }
-    // Mutes and unread markers are kept in memory for this session only.
-    val muted = remember { mutableStateListOf<String>() }
+    // Mutes persist independently; unread markers remain session-local.
+    val muteContext = LocalContext.current
+    val muteStore = remember { `in`.yashd.bitchat.ui.relay.MutedChatsStore(muteContext) }
+    val savedMutes by muteStore.mutes.collectAsState()
     val seenAt = remember { mutableStateMapOf<String, Long>() }
     // Favourites and pins are stored independently and encrypted across restarts.
     val context = LocalContext.current
@@ -130,6 +134,14 @@ fun RelayHome(
             RelayViewModel.recipientKey(routeTarget(route).orEmpty()))
     }.getOrNull()
     val favorites = items.map { it.info.route }.filter { favoriteKey(it) in savedFavorites }
+    val toggleFavorite: (String) -> Unit = { route ->
+        val key = favoriteKey(route)
+        if (key == null || !favoriteStore.toggle(key)) {
+            toast("Favorites could not be saved. Existing data was preserved.")
+        } else {
+            toast(if (key in favoriteStore.favorites.value) "Added to favorites" else "Removed from favorites")
+        }
+    }
     LaunchedEffect(favoriteStore.storageError) {
         if (favoriteStore.storageError) toast("Saved favorites are unavailable. Existing data was preserved. Restart to retry.")
     }
@@ -159,7 +171,7 @@ fun RelayHome(
             scope.launch {
                 pinStore.remove(route)
                 messagePinStore.removeChat(route)
-                muted.remove(route)
+                // Keep mute preferences when deleting history.
                 seenAt.remove(route)
                 if (chat == route) chat = null
                 if (contact == route) contact = null
@@ -172,6 +184,19 @@ fun RelayHome(
     }
     val atRoot = chatRoute == null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails
     val showingChat = chatRoute != null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails
+
+    LaunchedEffect(notificationRoute) {
+        notificationRoute?.let { route ->
+            goTab(0)
+            newChat = false
+            chat = route
+            notificationConsumed()
+        }
+    }
+    androidx.compose.runtime.DisposableEffect(showingChat, chatRoute, newChat) {
+        `in`.yashd.bitchat.notifications.MessageNotifications.visibleRoute = if (showingChat && !newChat) chatRoute else null
+        onDispose { `in`.yashd.bitchat.notifications.MessageNotifications.visibleRoute = null }
+    }
 
     BackHandler(enabled = !atRoot || tab != 0) {
         when {
@@ -234,19 +259,13 @@ fun RelayHome(
                         mesh = mesh,
                         internet = internet,
                         favorite = favoriteKey(contactRoute) in savedFavorites,
-                        muted = contactRoute in muted,
+                        muted = favoriteKey(contactRoute) in savedMutes,
                         back = { contact = null },
                         openChat = { openChat(contactRoute) },
-                        toggleFavorite = {
-                            val key = favoriteKey(contactRoute)
-                            if (key == null || !favoriteStore.toggle(key)) {
-                                toast("Favorites could not be saved. Existing data was preserved.")
-                            } else {
-                                toast(if (key in favoriteStore.favorites.value) "Added to favorites" else "Removed from favorites")
-                            }
-                        },
+                        toggleFavorite = { toggleFavorite(contactRoute) },
                         toggleMute = {
-                            if (contactRoute in muted) muted.remove(contactRoute) else muted.add(contactRoute)
+                            val key = favoriteKey(contactRoute)
+                            if (key == null || !muteStore.toggle(key)) toast("Mute could not be saved. Existing settings were preserved.")
                         },
                         toast = toast
                     )
@@ -276,6 +295,7 @@ fun RelayHome(
                         myName = myName,
                         now = maxOf(now, refreshedAt),
                         favorites = favorites,
+                        toggleFavorite = toggleFavorite,
                         loading = internet.storageLoading,
                         storageProblem = internet.storageError != null,
                         onAvatar = { goTab(2) },
