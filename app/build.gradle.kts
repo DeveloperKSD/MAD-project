@@ -49,6 +49,8 @@ dependencies {
     ksp("androidx.room:room-compiler:2.8.5")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.11.0")
     implementation("androidx.lifecycle:lifecycle-process:2.11.0")
+    implementation("androidx.work:work-runtime-ktx:2.11.2")
+    androidTestImplementation("androidx.work:work-testing:2.11.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")

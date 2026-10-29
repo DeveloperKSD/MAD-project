@@ -23,9 +23,11 @@ interface InternetBackend : Closeable {
     fun open(discovery: List<String>, received: (UnsignedNostrEvent) -> Unit,
              connection: (String, String) -> Unit, issue: (String) -> Unit): InternetSession
 }
-class AndroidInternetBackend(private val identity: NostrIdentityManager) : InternetBackend {
+class AndroidInternetBackend(private val identity: NostrIdentityManager,
+                             private val mayCreateIdentity: () -> Boolean = { true }) : InternetBackend {
     private val http = OkHttpClient()
-    override fun identity() = identity.loadOrCreate()
+    override fun identity() = if (mayCreateIdentity()) identity.loadOrCreate() else
+        requireNotNull(identity.loadExisting()) { "Saved identity unavailable" }
     override fun open(discovery: List<String>, received: (UnsignedNostrEvent) -> Unit,
                       connection: (String, String) -> Unit, issue: (String) -> Unit): InternetSession {
         val coordinator = NostrMessagingCoordinator(identity, http, discovery,
@@ -104,11 +106,13 @@ class InternetRuntime(private val backend: InternetBackend,
     @Volatile private var generation = 0
     private var operation: Job? = null
     private var configurationSaving = false
+    private var backgroundJob: Job? = null
     @Volatile private var closed = false
     init {
         scope.launch {
             val identity = try { backend.identity() } catch (_: Exception) {
-                mutable.update { it.copy(storageLoading = false) }
+                mutable.update { it.copy(storageLoading = false, configurationLoading = false,
+                    configurationError = "Saved identity is unavailable. Existing data was preserved.") }
                 error("Nostr identity could not be loaded. Existing identity data was preserved. Restart to retry.")
                 return@launch
             }
@@ -242,6 +246,7 @@ class InternetRuntime(private val backend: InternetBackend,
     fun clearError() { mutable.update { it.copy(error = null) } }
     fun start() = synchronized(lock) {
         if (closed) return@synchronized
+        backgroundJob?.cancel(BackgroundCatchUpPreempted())
         mutable.update { it.copy(active = true) }
         connect()
     }
@@ -265,7 +270,7 @@ class InternetRuntime(private val backend: InternetBackend,
         }
         synchronized(lock) {
             if (closed) return false
-            if (state.value.busy || configurationSaving) { error("Wait for the current operation before changing servers."); return false }
+            if (state.value.busy || configurationSaving || backgroundJob != null) { error("Wait for the current operation before changing servers."); return false }
             if (state.value.configurationLoading || state.value.configurationError != null || state.value.publicKey.isEmpty()) {
                 error(state.value.configurationError ?: "Wait for Internet settings to finish loading.")
                 return false
@@ -327,7 +332,7 @@ class InternetRuntime(private val backend: InternetBackend,
         return true
     }
     fun retrySetup() = synchronized(lock) {
-        if (state.value.busy || configurationSaving) return@synchronized
+        if (state.value.busy || configurationSaving || backgroundJob != null) return@synchronized
         val active = state.value.active
         stop()
         mutable.update { it.copy(error = null, setup = it.setup.copy(error = null)) }
@@ -341,7 +346,7 @@ class InternetRuntime(private val backend: InternetBackend,
     }
     private fun connect() {
         val snapshot = state.value
-        if (closed || !snapshot.active || snapshot.configurationLoading || snapshot.configurationError != null || snapshot.storageLoading || snapshot.storageError != null || snapshot.npub.isEmpty() || session != null || snapshot.discovery.isEmpty() || snapshot.inboxes.isEmpty()) return
+        if (closed || backgroundJob != null || !snapshot.active || snapshot.configurationLoading || snapshot.configurationError != null || snapshot.storageLoading || snapshot.storageError != null || snapshot.npub.isEmpty() || session != null || snapshot.discovery.isEmpty() || snapshot.inboxes.isEmpty()) return
         val receiveStartedAt = System.currentTimeMillis()
         val current = ++generation
         fun current() = current == generation && state.value.active
@@ -455,10 +460,71 @@ class InternetRuntime(private val backend: InternetBackend,
             } finally { synchronized(lock) { if (current == generation) mutable.update { it.copy(busy = false) } } }
         }
     }
+    /** Worker borrows the SAME history gate and exclusive transport ownership. Foreground
+     * activation cancels the bounded operation, then waits for its finally/connection close
+     * before opening live subscriptions. Never stops a foreground session or active send.
+     */
+    suspend fun backgroundCatchUp(owner: String,
+        action: suspend (suspend (UnsignedNostrEvent) -> Unit) -> Boolean): Boolean? = coroutineScope {
+        state.first { !it.storageLoading && !it.configurationLoading }
+        val job = currentCoroutineContext()[Job]!!
+        val admitted = synchronized(lock) {
+            check(!closed && state.value.storageError == null && state.value.configurationError == null)
+            check(state.value.publicKey == owner)
+            if (state.value.active || session != null || state.value.busy || configurationSaving || backgroundJob != null) false
+            else { backgroundJob = job; true }
+        }
+        if (!admitted) return@coroutineScope null
+        try {
+            action { rumor ->
+                // Transport callbacks may bridge through runBlocking; check the admitted
+                // owner's Job as well as the callback coroutine before touching history.
+                job.ensureActive()
+                currentCoroutineContext().ensureActive()
+                require(rumor.createdAtSeconds in 0..Long.MAX_VALUE / 1000)
+                val outgoing = rumor.pubkey == owner
+                val peer = if (outgoing) requireNotNull(rumor.tags.firstOrNull { it.firstOrNull() == "p" }?.getOrNull(1)) else rumor.pubkey
+                // The transport authenticates the inner rumor before calling this boundary.
+                // Room keeps deleted IDs and sender-copy status; no notification callback here.
+                historyGate.withLock {
+                    job.ensureActive()
+                    val id = NostrEventCodec.calculateId(rumor)
+                    history.received(owner, id, peer, rumor.content, outgoing, rumor.createdAtSeconds * 1000)
+                    // Keep an already-open latest thread current on resume, while preserving
+                    // the same older-page/read-position rules used by foreground reception.
+                    mergeHistory(history.changes(owner, id, peer))
+                }
+            }
+        } catch (e: LocalHistoryException) {
+            storageFailure()
+            throw e
+        } finally {
+            withContext(NonCancellable) {
+                try {
+                    historyGate.withLock { showHistory(history.load(owner)) }
+                } catch (e: Exception) {
+                    storageFailure()
+                    throw e
+                } finally {
+                    synchronized(lock) {
+                        backgroundJob = null
+                        if (state.value.active && !closed) connect()
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelBackgroundCatchUp() = synchronized(lock) {
+        backgroundJob?.cancel(BackgroundCatchUpPreempted())
+        Unit
+    }
+
     /** Terminal shutdown. UI owners must never call this when they are destroyed. */
     override fun close() = synchronized(lock) {
         if (closed) return@synchronized
         closed = true
+        backgroundJob?.cancel(BackgroundCatchUpPreempted())
         stop()
         val job = scope.coroutineContext[Job]!!
         scope.cancel()
@@ -477,3 +543,6 @@ class InternetRuntime(private val backend: InternetBackend,
             finally { if (!future.isDone) future.cancel(true) }
     }
 }
+
+/** A worker yields without marking a successful check when foreground takes ownership. */
+class BackgroundCatchUpPreempted : CancellationException("Foreground or settings took ownership")

@@ -10,6 +10,10 @@ import `in`.yashd.bitchat.MainActivity
 import `in`.yashd.bitchat.data.internet.RoomInternetHistoryRepository
 import `in`.yashd.bitchat.nostr.NostrIdentityManager
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.flow.first
+import `in`.yashd.bitchat.RelayApplication
+import `in`.yashd.bitchat.nostr.NostrNpub
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -28,10 +32,12 @@ class FavoriteStarActivityTest {
         val peer = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
         val name = "Star test ${peer.take(8)}"
         val key = FavoriteChatsStore.key("internet", owner, peer)
+        // The application runtime can already exist from another Activity/test. Seed through
+        // its public boundary so the shared snapshot and encrypted Room stay in sync.
+        val runtime = (context.applicationContext as RelayApplication).internetRuntime
         runBlocking {
-            RoomInternetHistoryRepository(context).let { repository ->
-                try { repository.contact(owner, peer, name) } finally { repository.close() }
-            }
+            withTimeout(10_000) { runtime.state.first { !it.storageLoading && !it.configurationLoading } }
+            assertNotNull(runtime.addInternetConversation(NostrNpub.encode(peer.chunked(2).map { it.toInt(16).toByte() }.toByteArray()), name))
         }
         fun launch() = ActivityScenario.launch<MainActivity>(Intent(context, MainActivity::class.java))
         fun awaitStar(description: String) {
@@ -45,7 +51,7 @@ class FavoriteStarActivityTest {
                 compose.onNodeWithTag("relay-bottom-navigation").assertIsDisplayed()
                 assertTrue(key in FavoriteChatsStore(context).favorites.value)
             }
-            // A new activity creates a new ViewModel and favourites store from disk.
+            // A new activity borrows the same runtime and reloads the favourites store from disk.
             launch().use {
                 awaitStar("Remove $name from favorites")
                 compose.onNodeWithContentDescription("Remove $name from favorites").assertIsOn()

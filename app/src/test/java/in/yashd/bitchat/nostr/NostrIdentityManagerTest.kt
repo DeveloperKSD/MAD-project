@@ -63,4 +63,21 @@ class NostrIdentityManagerTest {
         assertEquals(1, storage.writes)
     }
 
+    @Test fun backgroundReadsNeverCreateIdentityAndClearSecretBuffers() {
+        val storage = MemoryStorage()
+        val manager = NostrIdentityManager(storage)
+        assertNull(manager.loadExisting())
+        assertEquals(0, storage.writes)
+        assertThrows(IllegalStateException::class.java) { manager.withExistingSecret { fail("No saved key") } }
+        assertEquals(0, storage.writes)
+        val identity = manager.loadOrCreate()
+        assertEquals(identity, NostrIdentityManager(storage).loadExisting())
+        var captured: ByteArray? = null
+        manager.withExistingSecret { captured = it }
+        assertArrayEquals(ByteArray(32), captured)
+        storage.bytes = ByteArray(32)
+        assertThrows(NostrIdentityException::class.java) { manager.loadExisting() }
+        assertEquals(1, storage.writes)
+    }
+
 }

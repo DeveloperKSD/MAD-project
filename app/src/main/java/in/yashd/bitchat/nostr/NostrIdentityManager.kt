@@ -38,12 +38,31 @@ class NostrIdentityManager internal constructor(private val storage: NostrIdenti
         }
     }
 
+    /** Background work may read an existing identity, but must never create one. */
+    fun loadExisting(): NostrIdentity? = synchronized(lock) {
+        var secret: ByteArray? = null
+        try {
+            secret = storage.read() ?: return@synchronized null
+            require(Secp256k1.secKeyVerify(secret))
+            val publicKey = SchnorrSignature().publicKey(secret)
+            NostrIdentity(publicKey.lowercaseHex(), NostrNpub.encode(publicKey))
+        } catch (_: Exception) {
+            throw NostrIdentityException("Saved Nostr identity is unavailable; existing data was preserved")
+        } finally { secret?.fill(0) }
+    }
+
     /** Internal scoped key access; never export or retain the storage buffer. */
     internal fun <T> withSecret(action: (ByteArray) -> T): T = synchronized(lock) {
         loadOrCreate()
         val secret = try { requireNotNull(storage.read()) } catch (_: Exception) {
             throw NostrIdentityException("Nostr identity could not be loaded")
         }
+        try { action(secret) } finally { secret.fill(0) }
+    }
+
+    internal fun <T> withExistingSecret(action: (ByteArray) -> T): T = synchronized(lock) {
+        checkNotNull(loadExisting())
+        val secret = requireNotNull(storage.read())
         try { action(secret) } finally { secret.fill(0) }
     }
 

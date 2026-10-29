@@ -20,6 +20,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,6 +60,10 @@ internal fun RelaySettingsPage(
     toast: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val sync = (context.applicationContext as RelayApplication).backgroundSync
+    val syncStatus by sync.state.collectAsState()
+    val scope = rememberCoroutineScope()
+    var changingSync by remember { mutableStateOf(false) }
     var diagnostics by remember { mutableStateOf(false) }
     var about by remember { mutableStateOf(false) }
 
@@ -120,6 +129,20 @@ internal fun RelaySettingsPage(
         }
 
         item { DebugNotificationAction(toast) }
+
+        item {
+            BackgroundSyncSettingsCard(syncStatus, internet.readyToShare || internet.setup.finished, changingSync) { enabled ->
+                changingSync = true
+                scope.launch {
+                    try {
+                        val saved = withContext(Dispatchers.IO) {
+                            sync.setEnabled(enabled, internet.readyToShare || internet.setup.finished)
+                        }
+                        if (!saved) toast("Finish Internet Setup before enabling Background Sync, or check saved settings.")
+                    } finally { changingSync = false }
+                }
+            }
+        }
 
         // connection rows
         item {
