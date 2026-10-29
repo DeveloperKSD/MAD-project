@@ -69,6 +69,7 @@ class MainActivity : ComponentActivity() {
                     `in`.yashd.bitchat.ui.relay.AndroidInternetBackend(
                         `in`.yashd.bitchat.nostr.NostrIdentityManager(applicationContext)),
                     history = `in`.yashd.bitchat.data.internet.RoomInternetHistoryRepository(applicationContext),
+                    configurationStore = `in`.yashd.bitchat.data.internet.EncryptedInternetConfigurationStore(applicationContext),
                     onIncomingStored = { owner, peer, name ->
                         val npub = `in`.yashd.bitchat.nostr.NostrNpub.encode(peer.chunked(2).map { it.toInt(16).toByte() }.toByteArray())
                         `in`.yashd.bitchat.notifications.MessageNotifications.stored(applicationContext,

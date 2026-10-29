@@ -6,6 +6,9 @@
         <exclude domain="sharedpref" path="mute_chats.xml" />
     <!-- Defense in depth; identity is actually stored in noBackupFilesDir. -->
     <exclude domain="file" path="nostr_identity.enc" />
+        <exclude domain="file" path="nostr_configuration.enc" />
+        <exclude domain="file" path="nostr_configuration.enc.bak" />
+        <exclude domain="file" path="nostr_configuration.enc.new" />
     <exclude domain="file" path="nostr_identity.enc.bak" />
         <exclude domain="file" path="relay_history/" />
         <exclude domain="database" path="relay-internet.db" />

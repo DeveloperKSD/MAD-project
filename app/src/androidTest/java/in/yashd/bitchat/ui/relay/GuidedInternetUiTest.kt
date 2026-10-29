@@ -47,7 +47,7 @@ class GuidedInternetUiTest {
         return compose.onNodeWithText(text)
     }
     private fun beginSetup() {
-        compose.onNodeWithText("Settings").performClick()
+        compose.onNode(hasText("Settings") and hasClickAction()).performClick()
         compose.onNodeWithTag("relay-settings-list").performScrollToNode(hasText("Nostr Relays"))
         compose.onNodeWithText("Nostr Relays").performClick()
     }

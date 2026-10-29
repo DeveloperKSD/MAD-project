@@ -76,6 +76,7 @@ data class RelayUiState(
     val messages: List<InternetMessage> = emptyList(), val busy: Boolean = false,
     val active: Boolean = false, val notice: String? = null, val error: String? = null,
     val storageLoading: Boolean = true, val storageError: String? = null,
+    val configurationLoading: Boolean = true, val configurationError: String? = null,
     val conversations: List<InternetConversation> = emptyList(), val setup: InternetSetupState = InternetSetupState(),
     val threadPeer: String? = null, val thread: List<InternetMessage> = emptyList(),
     val threadLoading: Boolean = false, val threadLatest: Boolean = true, val threadHasOlder: Boolean = false
@@ -87,6 +88,7 @@ data class RelayUiState(
 class RelayViewModel(private val backend: InternetBackend,
                      dispatcher: CoroutineDispatcher = Dispatchers.IO,
                      private val history: InternetHistoryRepository,
+                     private val configurationStore: InternetConfigurationStore? = null,
                      private val onIncomingStored: (String, String, String) -> Unit = { _, _, _ -> }) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val mutable = MutableStateFlow(RelayUiState())
@@ -96,6 +98,7 @@ class RelayViewModel(private val backend: InternetBackend,
     private var session: InternetSession? = null
     @Volatile private var generation = 0
     private var operation: Job? = null
+    private var configurationSaving = false
     init {
         scope.launch {
             val identity = try { backend.identity() } catch (_: Exception) {
@@ -104,6 +107,15 @@ class RelayViewModel(private val backend: InternetBackend,
                 return@launch
             }
             mutable.update { it.copy(npub = identity.npub, publicKey = identity.publicKeyHex) }
+            try {
+                val saved = configurationStore?.load(identity.publicKeyHex)
+                mutable.update { old -> old.copy(configurationLoading = false,
+                    discovery = saved?.discovery.orEmpty(), inboxes = saved?.inboxes.orEmpty(),
+                    setup = old.setup.copy(discoveryDraft = saved?.discovery?.joinToString("\n").orEmpty(),
+                        inboxDraft = saved?.inboxes?.joinToString("\n").orEmpty())) }
+            } catch (_: Exception) {
+                configurationFailure()
+            }
             try {
                 historyGate.withLock {
                     history.load(identity.publicKeyHex) // Validate every encrypted field before changing pending state.
@@ -114,6 +126,11 @@ class RelayViewModel(private val backend: InternetBackend,
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) { storageFailure() }
         }
+    }
+    private fun configurationFailure() {
+        val message = "Saved Internet servers are unavailable. Existing configuration and identity were preserved. Restart Relay to retry."
+        mutable.update { it.copy(configurationLoading = false, configurationError = message,
+            error = message, setup = it.setup.copy(error = message)) }
     }
     private fun storageFailure() {
         mutable.update { it.copy(storageLoading = false,
@@ -230,7 +247,8 @@ class RelayViewModel(private val backend: InternetBackend,
                 error = "Publishing was interrupted. The outcome is unknown. Return to this step and retry when connected.") else old.setup,
             messages = old.messages.map { if (it.status == "Sending…") it.copy(status = "Interrupted · outcome unknown") else it }) }
     }
-    fun configure(discoveryText: String, inboxText: String): Boolean {
+    /** Returns validation/admission; onSaved runs only after durable storage succeeds. */
+    fun configure(discoveryText: String, inboxText: String, onSaved: () -> Unit = {}): Boolean {
         val discovery: List<String>; val inboxes: List<String>
         try { discovery = parseRelays(discoveryText); inboxes = parseRelays(inboxText) }
         catch (_: Exception) {
@@ -238,21 +256,48 @@ class RelayViewModel(private val backend: InternetBackend,
             error(message); mutable.update { it.copy(setup = it.setup.copy(error = message)) }; return false
         }
         synchronized(lock) {
-            if (state.value.busy) { error("Wait for the current operation before changing servers."); return false }
-            val active = state.value.active
-            val changed = state.value.discovery != discovery || state.value.inboxes != inboxes
-            if (changed || session == null) {
-                stop()
-                mutable.update { it.copy(discovery = discovery, inboxes = inboxes, error = null,
-                    setup = it.setup.copy(discoveryDraft = discoveryText, inboxDraft = inboxText, error = null,
-                        announcement = if (changed) InboxAnnouncement.NOT_PUBLISHED else it.setup.announcement,
-                        publications = if (changed) emptyList() else it.setup.publications, finished = if (changed) false else it.setup.finished),
-                    notice = "Servers configured. Publish your inbox announcement before sharing your ID.") }
-                if (active) start()
+            if (state.value.busy || configurationSaving) { error("Wait for the current operation before changing servers."); return false }
+            if (state.value.configurationLoading || state.value.configurationError != null || state.value.publicKey.isEmpty()) {
+                error(state.value.configurationError ?: "Wait for Internet settings to finish loading.")
+                return false
             }
-            mutable.update { it.copy(error = null, setup = it.setup.copy(error = null)) }
+            if (configurationStore != null) {
+                configurationSaving = true
+                mutable.update { it.copy(busy = true) }
+                scope.launch {
+                    try {
+                        configurationStore.save(state.value.publicKey, InternetConfiguration(discovery, inboxes))
+                        synchronized(lock) {
+                            applyConfiguration(discovery, inboxes, discoveryText, inboxText)
+                            onSaved()
+                        }
+                    } catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { configurationFailure() }
+                    finally { synchronized(lock) {
+                        configurationSaving = false
+                        mutable.update { it.copy(busy = false) }
+                    } }
+                }
+                return true
+            }
+            applyConfiguration(discovery, inboxes, discoveryText, inboxText)
+            onSaved()
             return true
         }
+    }
+    private fun applyConfiguration(discovery: List<String>, inboxes: List<String>, discoveryText: String, inboxText: String) {
+        val active = state.value.active
+        val changed = state.value.discovery != discovery || state.value.inboxes != inboxes
+        if (changed || session == null) {
+            stop()
+            mutable.update { it.copy(discovery = discovery, inboxes = inboxes, error = null,
+                setup = it.setup.copy(discoveryDraft = discoveryText, inboxDraft = inboxText, error = null,
+                    announcement = if (changed) InboxAnnouncement.NOT_PUBLISHED else it.setup.announcement,
+                    publications = if (changed) emptyList() else it.setup.publications, finished = if (changed) false else it.setup.finished),
+                notice = "Servers configured. Publish your inbox announcement before sharing your ID.") }
+            if (active) start()
+        }
+        mutable.update { it.copy(error = null, setup = it.setup.copy(error = null)) }
     }
     fun updateSetupServers(discovery: String, inbox: String) {
         mutable.update { it.copy(error = null, setup = it.setup.copy(discoveryDraft = discovery, inboxDraft = inbox, error = null)) }
@@ -260,8 +305,9 @@ class RelayViewModel(private val backend: InternetBackend,
     fun setupBack() { mutable.update { it.copy(setup = it.setup.copy(step = (it.setup.step - 1).coerceAtLeast(0))) } }
     fun setupNext() {
         when (state.value.setup.step) {
-            0 -> if (configure(state.value.setup.discoveryDraft, state.value.setup.inboxDraft))
+            0 -> configure(state.value.setup.discoveryDraft, state.value.setup.inboxDraft) {
                 mutable.update { it.copy(setup = it.setup.copy(step = 1)) }
+            }
             1 -> if (state.value.readyToShare) mutable.update { it.copy(setup = it.setup.copy(step = 2)) }
         }
     }
@@ -271,7 +317,7 @@ class RelayViewModel(private val backend: InternetBackend,
         return true
     }
     fun retrySetup() = synchronized(lock) {
-        if (state.value.busy) return@synchronized
+        if (state.value.busy || configurationSaving) return@synchronized
         val active = state.value.active
         stop()
         mutable.update { it.copy(error = null, setup = it.setup.copy(error = null)) }
@@ -285,7 +331,7 @@ class RelayViewModel(private val backend: InternetBackend,
     }
     private fun connect() {
         val snapshot = state.value
-        if (snapshot.storageLoading || snapshot.storageError != null || snapshot.npub.isEmpty() || session != null || snapshot.discovery.isEmpty() || snapshot.inboxes.isEmpty()) return
+        if (snapshot.configurationLoading || snapshot.configurationError != null || snapshot.storageLoading || snapshot.storageError != null || snapshot.npub.isEmpty() || session != null || snapshot.discovery.isEmpty() || snapshot.inboxes.isEmpty()) return
         val receiveStartedAt = System.currentTimeMillis()
         val current = ++generation
         fun current() = current == generation && state.value.active
@@ -376,7 +422,7 @@ class RelayViewModel(private val backend: InternetBackend,
         if (snapshot.storageLoading || snapshot.storageError != null) return@synchronized
         if (snapshot.npub.isEmpty()) { error("Nostr identity is unavailable."); return@synchronized }
         if (!snapshot.active || transport == null) { error("Configure discovery and inbox relays in Settings and keep the app open."); return@synchronized }
-        if (snapshot.busy) return@synchronized
+        if (snapshot.busy || configurationSaving) return@synchronized
         mutable.update { it.copy(busy = true, error = null, notice = null) }
         val current = generation
         operation = scope.launch {

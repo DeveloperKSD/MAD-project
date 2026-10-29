@@ -44,6 +44,99 @@ class RelayViewModelTest {
         }
         override fun close() { closed = true }
     }
+    private class Settings : `in`.yashd.bitchat.data.internet.InternetConfigurationStore {
+        var saved: `in`.yashd.bitchat.data.internet.InternetConfiguration? = null
+        var failLoad = false
+        var failSave = false
+        var saves = 0
+        var owner: String? = null
+        override fun load(owner: String): `in`.yashd.bitchat.data.internet.InternetConfiguration? {
+            if (failLoad) throw IllegalStateException("private error")
+            return saved
+        }
+        override fun save(owner: String, configuration: `in`.yashd.bitchat.data.internet.InternetConfiguration) {
+            saves++
+            if (failSave) throw IllegalStateException("private error")
+            this.owner = owner
+            saved = configuration
+        }
+    }
+    @Test fun settingsRestoreOnNewViewModelWithoutInventingConnectionOrPublication() {
+        val settings = Settings()
+        val stores = mutableListOf<ViewModelStore>()
+        fun model(backend: Backend): RelayViewModel = RelayViewModel(backend, Dispatchers.Unconfined,
+            `in`.yashd.bitchat.data.internet.TestHistoryRepository(), configurationStore = settings).also {
+                stores.add(ViewModelStore().apply { put("relay", it) })
+            }
+        try {
+            val first = model(Backend())
+            first.updateSetupServers("wss://discovery.example", "wss://inbox.example")
+            first.setupNext()
+            assertEquals(1, first.state.value.setup.step)
+            assertEquals("01".repeat(32), settings.owner)
+            stores.first().clear()
+            val network = Backend()
+            val second = model(network)
+            assertEquals(listOf("wss://discovery.example"), second.state.value.discovery)
+            assertEquals(listOf("wss://inbox.example"), second.state.value.inboxes)
+            assertEquals("wss://inbox.example", second.state.value.setup.inboxDraft)
+            assertTrue(second.state.value.connections.isEmpty())
+            assertFalse(second.state.value.inboxesConnected)
+            assertEquals(InboxAnnouncement.NOT_PUBLISHED, second.state.value.setup.announcement)
+            assertFalse(second.state.value.setup.finished)
+            assertEquals(0, network.opened)
+            second.start()
+            assertEquals(1, network.opened)
+            assertFalse(second.state.value.inboxesConnected)
+            network.connected("wss://inbox.example", "connected")
+            assertTrue(second.state.value.inboxesConnected)
+            assertEquals(InboxAnnouncement.NOT_PUBLISHED, second.state.value.setup.announcement)
+        } finally { stores.forEach { it.clear() } }
+    }
+    @Test fun unreadableSettingsBlockWritesAndConnectionWithoutBlockingHistory() {
+        val settings = Settings().apply { failLoad = true }
+        val network = Backend()
+        val model = RelayViewModel(network, Dispatchers.Unconfined,
+            `in`.yashd.bitchat.data.internet.TestHistoryRepository(), configurationStore = settings)
+        val store = ViewModelStore().apply { put("relay", model) }
+        try {
+            assertFalse(model.state.value.storageLoading)
+            assertNotNull(model.state.value.configurationError)
+            model.start()
+            assertFalse(model.configure("wss://discovery.example", "wss://inbox.example"))
+            assertEquals(0, settings.saves)
+            assertEquals(0, network.opened)
+            assertFalse(model.state.value.configurationError!!.contains("private error"))
+        } finally { store.clear() }
+    }
+    @Test fun failedSavePreservesCurrentSettingsAndSetupStep() {
+        val settings = Settings()
+        val model = RelayViewModel(Backend(), Dispatchers.Unconfined,
+            `in`.yashd.bitchat.data.internet.TestHistoryRepository(), configurationStore = settings)
+        val store = ViewModelStore().apply { put("relay", model) }
+        try {
+            model.configure("wss://old.example", "wss://inbox.example")
+            settings.failSave = true
+            model.updateSetupServers("wss://new.example", "wss://new-inbox.example")
+            model.setupNext()
+            assertEquals(listOf("wss://old.example"), model.state.value.discovery)
+            assertEquals(listOf("wss://old.example"), settings.saved!!.discovery)
+            assertEquals(0, model.state.value.setup.step)
+            assertNotNull(model.state.value.configurationError)
+            assertFalse(model.state.value.busy)
+        } finally { store.clear() }
+    }
+    @Test fun invalidSettingsNeverReachPersistence() {
+        val settings = Settings()
+        val model = RelayViewModel(Backend(), Dispatchers.Unconfined,
+            `in`.yashd.bitchat.data.internet.TestHistoryRepository(), configurationStore = settings)
+        val store = ViewModelStore().apply { put("relay", model) }
+        try {
+            assertFalse(model.configure("ws://unsafe.example", "wss://inbox.example"))
+            assertEquals(0, settings.saves)
+            assertNull(model.state.value.configurationError)
+        } finally { store.clear() }
+    }
     private fun withModel(action: suspend (RelayViewModel, Backend) -> Unit) {
         val backend = Backend()
         val model = RelayViewModel(backend, Dispatchers.Unconfined, `in`.yashd.bitchat.data.internet.TestHistoryRepository())
