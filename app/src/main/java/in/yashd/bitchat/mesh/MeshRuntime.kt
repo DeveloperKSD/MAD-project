@@ -181,9 +181,10 @@ object MeshRuntime {
     }
 
     /** [peerId] null means the public Nearby group. */
-    fun deleteConversation(peerId: String?) = scope.launch {
+    fun deleteConversation(peerId: String?, onDeleted: () -> Unit = {}) = scope.launch {
         if (!::messageStore.isInitialized) return@launch
         runCatching { messageStore.deleteConversation(peerId) }
+            .onSuccess { onDeleted() }
             .onFailure { addError("Couldn't delete the chat; existing data was preserved.") }
     }
 

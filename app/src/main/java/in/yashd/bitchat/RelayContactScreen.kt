@@ -42,7 +42,7 @@ import `in`.yashd.bitchat.ui.relay.RelayUiState
 
 // ---------------------------------------------------------------------------
 // Contact profile (Figma 3). Opened from a chat header or from Discover.
-// Call, mute, favourites and shared media are visual only for now.
+// Call and shared media are placeholders; mute is session-only and favourites are persisted.
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -252,7 +252,6 @@ private fun ContactMenu(
             onClick = {
                 dismiss()
                 toggleFavorite()
-                toast(if (favorite) "Removed from favorites" else "Added to favorites")
             }
         )
         DropdownMenuItem(text = { Text("Copy ID") }, onClick = { dismiss(); copyId() })

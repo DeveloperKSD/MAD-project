@@ -4,6 +4,7 @@
     <cloud-backup>
         <exclude domain="sharedpref" path="identity.xml" />
         <exclude domain="sharedpref" path="messages.xml" />
+        <exclude domain="sharedpref" path="favorite_chats.xml" />
         <exclude domain="file" path="nostr_identity.enc" />
         <exclude domain="file" path="nostr_identity.enc.bak" />
         <exclude domain="file" path="relay_history/" />
@@ -15,6 +16,7 @@
     <device-transfer>
         <exclude domain="sharedpref" path="identity.xml" />
         <exclude domain="sharedpref" path="messages.xml" />
+        <exclude domain="sharedpref" path="favorite_chats.xml" />
         <exclude domain="file" path="nostr_identity.enc" />
         <exclude domain="file" path="nostr_identity.enc.bak" />
         <exclude domain="file" path="relay_history/" />

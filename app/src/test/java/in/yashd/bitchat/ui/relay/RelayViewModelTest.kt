@@ -51,6 +51,30 @@ class RelayViewModelTest {
         try { kotlinx.coroutines.runBlocking { action(model, backend) } } finally { store.clear() }
         assertTrue(backend.closed)
     }
+    @Test fun conversationDeletionNotifiesOnlyAfterSuccess() {
+        val delegate = `in`.yashd.bitchat.data.internet.TestHistoryRepository()
+        var fail = false
+        var deleted = false
+        val repository = object : `in`.yashd.bitchat.data.internet.InternetHistoryRepository by delegate {
+            override suspend fun deleteConversation(owner: String, peer: String) {
+                if (fail) throw IllegalStateException("storage failed")
+                delegate.deleteConversation(owner, peer)
+                deleted = true
+            }
+        }
+        val model = RelayViewModel(Backend(), Dispatchers.Unconfined, repository)
+        val holder = ViewModelStore().apply { put("relay", model) }
+        try {
+            var callbacks = 0
+            model.deleteConversation(npub) { assertTrue(deleted); callbacks++ }
+            assertEquals(1, callbacks)
+            fail = true
+            model.deleteConversation(npub) { callbacks++ }
+            assertEquals(1, callbacks)
+            assertNotNull(model.state.value.storageError)
+        } finally { holder.clear() }
+    }
+
     private fun configured(model: RelayViewModel) { model.start(); model.configure("wss://discovery.example", "wss://inbox.example") }
     @Test fun relayValidationRejectsInsecureAndAmbiguousUrls() {
         listOf("", "ws://example.com", "https://example.com", "wss://u:p@example.com", "wss://example.com/#fragment", "wss://example.com:0").forEach {

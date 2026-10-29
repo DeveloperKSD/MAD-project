@@ -174,7 +174,7 @@ class RelayViewModel(private val backend: InternetBackend,
         }
     }
     /** Deletes a whole Internet chat from this phone only. A new message from that person starts it again. */
-    fun deleteConversation(npub: String) {
+    fun deleteConversation(npub: String, onDeleted: () -> Unit = {}) {
         val peer = runCatching { recipientKey(npub) }.getOrNull() ?: return
         scope.launch {
             val snapshot = state.value
@@ -189,6 +189,7 @@ class RelayViewModel(private val backend: InternetBackend,
                         thread = if (old.threadPeer == peer) emptyList() else old.thread,
                         threadLoading = if (old.threadPeer == peer) false else old.threadLoading,
                         threadHasOlder = if (old.threadPeer == peer) false else old.threadHasOlder) }
+                    onDeleted()
                 }
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) { storageFailure() }

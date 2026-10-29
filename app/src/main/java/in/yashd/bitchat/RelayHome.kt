@@ -54,6 +54,7 @@ import `in`.yashd.bitchat.mesh.MeshRuntime
 import `in`.yashd.bitchat.mesh.MeshUiState
 import `in`.yashd.bitchat.ui.relay.InternetSetupScreen
 import `in`.yashd.bitchat.ui.relay.OnlineChatScreen
+import `in`.yashd.bitchat.ui.relay.FavoriteChatsStore
 import `in`.yashd.bitchat.ui.relay.PinnedChatsStore
 import `in`.yashd.bitchat.ui.relay.PinnedMessagesStore
 import `in`.yashd.bitchat.ui.relay.RelayViewModel
@@ -92,12 +93,13 @@ fun RelayHome(
     var setupOpen by rememberSaveable { mutableStateOf(false) }
     var nearbyDetails by rememberSaveable { mutableStateOf(false) }
     var newChat by remember { mutableStateOf(false) }
-    // Favourites, mutes and unread markers are kept in memory for this session only.
-    val favorites = remember { mutableStateListOf<String>() }
+    // Mutes and unread markers are kept in memory for this session only.
     val muted = remember { mutableStateListOf<String>() }
     val seenAt = remember { mutableStateMapOf<String, Long>() }
-    // Pinned chats are the one exception: they are saved (encrypted) so they stay pinned after a restart.
+    // Favourites and pins are stored independently and encrypted across restarts.
     val context = LocalContext.current
+    val favoriteStore = remember { FavoriteChatsStore(context) }
+    val savedFavorites by favoriteStore.favorites.collectAsState()
     val pinStore = remember { PinnedChatsStore(context) }
     val pinned by pinStore.pinned.collectAsState()
     // Pinned messages inside chats are saved the same way (ids only).
@@ -122,6 +124,15 @@ fun RelayHome(
         }
     }
     val items = buildChatList(internet, mesh, seenAt, sessionStart)
+    fun favoriteKey(route: String): String? = runCatching {
+        if (routeIsNearby(route)) FavoriteChatsStore.key("nearby", mesh.localPeerId, routeTarget(route))
+        else FavoriteChatsStore.key("internet", internet.publicKey,
+            RelayViewModel.recipientKey(routeTarget(route).orEmpty()))
+    }.getOrNull()
+    val favorites = items.map { it.info.route }.filter { favoriteKey(it) in savedFavorites }
+    LaunchedEffect(favoriteStore.storageError) {
+        if (favoriteStore.storageError) toast("Saved favorites are unavailable. Existing data was preserved. Restart to retry.")
+    }
     val myName = mesh.displayName
 
     val goTab: (Int) -> Unit = { index ->
@@ -141,16 +152,23 @@ fun RelayHome(
     }
     val deleteChat: (String) -> Unit = { route ->
         val target = routeTarget(route)
-        if (routeIsNearby(route)) MeshRuntime.deleteConversation(target)
-        else if (target != null) model.deleteConversation(target)
-        pinStore.remove(route)
-        messagePinStore.removeChat(route)
-        favorites.remove(route)
-        muted.remove(route)
-        seenAt.remove(route)
-        if (chat == route) chat = null
-        if (contact == route) contact = null
-        toast("Chat deleted")
+        val key = favoriteKey(route)
+        val deleted: () -> Unit = {
+            // Persist cleanup even if the UI scope was cancelled by recreation during deletion.
+            val removed = key == null || favoriteStore.remove(key)
+            scope.launch {
+                pinStore.remove(route)
+                messagePinStore.removeChat(route)
+                muted.remove(route)
+                seenAt.remove(route)
+                if (chat == route) chat = null
+                if (contact == route) contact = null
+                toast(if (removed) "Chat deleted" else "Chat deleted, but saved favorites could not be updated. Existing favorites were preserved.")
+            }
+            Unit
+        }
+        if (routeIsNearby(route)) MeshRuntime.deleteConversation(target, deleted)
+        else if (target != null) model.deleteConversation(target, deleted)
     }
     val atRoot = chatRoute == null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails
     val showingChat = chatRoute != null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails
@@ -215,12 +233,17 @@ fun RelayHome(
                         info = describeRoute(contactRoute, mesh, internet),
                         mesh = mesh,
                         internet = internet,
-                        favorite = contactRoute in favorites,
+                        favorite = favoriteKey(contactRoute) in savedFavorites,
                         muted = contactRoute in muted,
                         back = { contact = null },
                         openChat = { openChat(contactRoute) },
                         toggleFavorite = {
-                            if (contactRoute in favorites) favorites.remove(contactRoute) else favorites.add(contactRoute)
+                            val key = favoriteKey(contactRoute)
+                            if (key == null || !favoriteStore.toggle(key)) {
+                                toast("Favorites could not be saved. Existing data was preserved.")
+                            } else {
+                                toast(if (key in favoriteStore.favorites.value) "Added to favorites" else "Removed from favorites")
+                            }
                         },
                         toggleMute = {
                             if (contactRoute in muted) muted.remove(contactRoute) else muted.add(contactRoute)
