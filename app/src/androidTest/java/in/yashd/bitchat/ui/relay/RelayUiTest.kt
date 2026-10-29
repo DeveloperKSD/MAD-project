@@ -3,6 +3,7 @@ package `in`.yashd.bitchat.ui.relay
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.unit.dp
 import `in`.yashd.bitchat.*
 import `in`.yashd.bitchat.mesh.*
 import `in`.yashd.bitchat.nostr.*
@@ -27,6 +28,63 @@ internal fun CurrentChats(loading: Boolean = false, unavailable: Boolean = false
 class RelayUiTest {
     @get:Rule val compose = createComposeRule()
     private val npub = NostrNpub.encode(ByteArray(32) { 1 })
+
+    @Test fun newChatFabIsAccessibleOnEmptyAndFilteredLists() {
+        var clicks = 0
+        compose.setContent { RelayDesignTheme {
+            RelayChatsScreen(emptyList(), "Me", 0, emptyList(), false, false, {}, {}, { clicks++ }, {})
+        } }
+        compose.onNodeWithText("No chats yet").assertIsDisplayed()
+        val fab = compose.onNodeWithContentDescription("New Chat")
+        fab.assertIsDisplayed().assertHasClickAction().assertWidthIsEqualTo(56.dp).assertHeightIsEqualTo(56.dp)
+        fab.performClick()
+        compose.runOnIdle { assertEquals(1, clicks) }
+        listOf("Nearby", "Internet", "Offline", "Favorites", "All").forEach { filter ->
+            compose.onNodeWithText(filter).performScrollTo().performClick()
+            compose.onAllNodesWithContentDescription("New Chat").assertCountEquals(1)
+            fab.assertIsDisplayed()
+        }
+    }
+
+    @Test fun newChatFabStaysFixedWhilePopulatedListScrollsAndLeavesLastChatClear() {
+        val rows = (1..40).map { index ->
+            ChatListItem(RouteInfo("nearby:friend-$index", true, "friend-$index", "Friend $index",
+                "Nearby", true, null, "friend-$index"), "Hello", index.toLong(), false, false, 0)
+        }
+        var clicks = 0
+        compose.setContent { RelayDesignTheme {
+            RelayChatsScreen(rows, "Me", 0, emptyList(), false, false, {}, {}, { clicks++ }, {})
+        } }
+        val fab = compose.onNodeWithContentDescription("New Chat")
+        val initialBounds = fab.getUnclippedBoundsInRoot()
+        compose.onNodeWithTag("relay-chat-list").performScrollToIndex(42)
+        compose.onNodeWithText("Friend 40").assertIsDisplayed()
+        fab.assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals(1, clicks) }
+        assertEquals(initialBounds, fab.getUnclippedBoundsInRoot())
+        org.junit.Assert.assertTrue(compose.onNodeWithText("Friend 40").getUnclippedBoundsInRoot().bottom <= initialBounds.top)
+        compose.onNodeWithTag("relay-chat-list").performScrollToIndex(0)
+        compose.onNodeWithText("Favorites").performScrollTo().performClick()
+        compose.onNodeWithText("No chats found").assertIsDisplayed()
+        fab.assertIsDisplayed()
+    }
+
+    @Test fun newChatFabIsAboveBottomNavigationAndAbsentFromDiscoverSettingsAndSetup() = withApp {
+        val fab = compose.onNodeWithContentDescription("New Chat")
+        fab.assertIsDisplayed()
+        val bounds = fab.getUnclippedBoundsInRoot()
+        org.junit.Assert.assertTrue(bounds.bottom < compose.onNodeWithTag("relay-bottom-navigation").getUnclippedBoundsInRoot().top)
+        fab.performClick()
+        compose.onNodeWithText("Chat Nearby").assertIsDisplayed()
+        compose.onNodeWithText("Chat Online").assertIsDisplayed()
+        compose.onNodeWithText("Chat Nearby").performClick()
+        fab.assertDoesNotExist()
+        compose.onNode(hasText("Settings") and hasClickAction()).performClick()
+        fab.assertDoesNotExist()
+        compose.onNodeWithText("Nostr Relays").performScrollTo().performClick()
+        fab.assertDoesNotExist()
+        compose.onNodeWithText("Choose your servers").assertIsDisplayed()
+    }
 
     @Test fun settingsShowsPublicIdentityAndSetupEntry() {
         var opened = false
@@ -85,6 +143,7 @@ class RelayUiTest {
     @Test fun newChatValidatesAndReopensNamedConversationWithoutIdEntry() = withApp {
         compose.onNodeWithContentDescription("New Chat").performClick()
         compose.onNodeWithText("Chat Online").performClick()
+        compose.onNodeWithContentDescription("New Chat").assertDoesNotExist()
         compose.onNodeWithText("Friend’s public Relay ID (npub)").performTextInput("invalid")
         compose.onNodeWithText("Start Chat").performScrollTo().performClick()
         compose.onNodeWithText("That public ID doesn’t look right. Ask your friend to copy their full npub again.").assertIsDisplayed()
@@ -92,7 +151,13 @@ class RelayUiTest {
         compose.onNodeWithText("Name for this chat (optional)").performTextInput("Aarav")
         compose.onNodeWithText("Start Chat").performScrollTo().performClick()
         compose.onNodeWithText("Aarav").assertIsDisplayed()
+        compose.onNodeWithContentDescription("New Chat").assertDoesNotExist()
+        compose.onNodeWithContentDescription("More options").performClick()
+        compose.onNodeWithText("View contact").performClick()
+        compose.onNodeWithContentDescription("New Chat").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Back").performClick()
         compose.onNodeWithContentDescription("Back to Chats").performClick()
+        compose.onNodeWithContentDescription("New Chat").assertIsDisplayed()
         compose.onNodeWithText("Aarav").performClick()
         compose.onNodeWithText("Friend’s public Relay ID (npub)").assertDoesNotExist()
         compose.onNodeWithText("Aarav").assertIsDisplayed()
