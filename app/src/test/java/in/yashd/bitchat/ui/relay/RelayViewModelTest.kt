@@ -75,6 +75,47 @@ class RelayViewModelTest {
         } finally { holder.clear() }
     }
 
+    @Test fun incomingNotificationsRequireNewLiveStoredIncomingMessages() {
+        val backend = Backend()
+        val history = `in`.yashd.bitchat.data.internet.TestHistoryRepository()
+        var alerts = 0
+        val model = RelayViewModel(backend, Dispatchers.Unconfined, history) { _, peer, _ ->
+            assertEquals("02".repeat(32), peer)
+            alerts++
+        }
+        val holder = ViewModelStore().apply { put("relay", model) }
+        try {
+            configured(model)
+            val fresh = UnsignedNostrEvent("02".repeat(32), System.currentTimeMillis() / 1000 + 2, 14, content = "private")
+            backend.received(fresh)
+            assertEquals(1, alerts)
+            assertEquals("private", model.state.value.messages.single().body)
+            backend.received(fresh)
+            backend.received(fresh.copy(createdAtSeconds = 1))
+            backend.received(fresh.copy(pubkey = "01".repeat(32), tags = listOf(listOf("p", "02".repeat(32)))))
+            assertEquals(1, alerts)
+        } finally { holder.clear() }
+    }
+
+    @Test fun failedStorageNeverNotifies() {
+        val backend = Backend()
+        val delegate = `in`.yashd.bitchat.data.internet.TestHistoryRepository()
+        val history = object : `in`.yashd.bitchat.data.internet.InternetHistoryRepository by delegate {
+            override suspend fun received(owner: String, rumorId: String, peer: String, body: String, outgoing: Boolean, time: Long) {
+                throw IllegalStateException("disk unavailable")
+            }
+        }
+        var alerts = 0
+        val model = RelayViewModel(backend, Dispatchers.Unconfined, history) { _, _, _ -> alerts++ }
+        val holder = ViewModelStore().apply { put("relay", model) }
+        try {
+            configured(model)
+            backend.received(UnsignedNostrEvent("02".repeat(32), System.currentTimeMillis() / 1000 + 2, 14, content = "private"))
+            assertEquals(0, alerts)
+            assertNotNull(model.state.value.storageError)
+        } finally { holder.clear() }
+    }
+
     private fun configured(model: RelayViewModel) { model.start(); model.configure("wss://discovery.example", "wss://inbox.example") }
     @Test fun relayValidationRejectsInsecureAndAmbiguousUrls() {
         listOf("", "ws://example.com", "https://example.com", "wss://u:p@example.com", "wss://example.com/#fragment", "wss://example.com:0").forEach {

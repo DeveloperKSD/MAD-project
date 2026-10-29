@@ -86,7 +86,8 @@ data class RelayUiState(
 
 class RelayViewModel(private val backend: InternetBackend,
                      dispatcher: CoroutineDispatcher = Dispatchers.IO,
-                     private val history: InternetHistoryRepository) : ViewModel() {
+                     private val history: InternetHistoryRepository,
+                     private val onIncomingStored: (String, String, String) -> Unit = { _, _, _ -> }) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val mutable = MutableStateFlow(RelayUiState())
     val state = mutable.asStateFlow()
@@ -285,6 +286,7 @@ class RelayViewModel(private val backend: InternetBackend,
     private fun connect() {
         val snapshot = state.value
         if (snapshot.storageLoading || snapshot.storageError != null || snapshot.npub.isEmpty() || session != null || snapshot.discovery.isEmpty() || snapshot.inboxes.isEmpty()) return
+        val receiveStartedAt = System.currentTimeMillis()
         val current = ++generation
         fun current() = current == generation && state.value.active
         val opened = backend.open(snapshot.discovery, { rumor ->
@@ -293,7 +295,16 @@ class RelayViewModel(private val backend: InternetBackend,
                 val peer = if (outgoing) rumor.tags.firstOrNull { it.firstOrNull() == "p" }?.getOrNull(1) ?: rumor.pubkey else rumor.pubkey
                 val id = NostrEventCodec.calculateId(rumor)
                 if (rumor.createdAtSeconds > Long.MAX_VALUE / 1000) return@launch
-                store(id) { owner -> history.received(owner, id, peer, rumor.content, outgoing, rumor.createdAtSeconds * 1000) }
+                var inserted = false
+                val stored = store(id) { owner ->
+                    inserted = !history.containsRumor(owner, id)
+                    history.received(owner, id, peer, rumor.content, outgoing, rumor.createdAtSeconds * 1000)
+                }
+                if (stored && inserted && !outgoing && current() &&
+                    `in`.yashd.bitchat.notifications.NotificationPolicy.isLive(rumor.createdAtSeconds * 1000, receiveStartedAt, System.currentTimeMillis())) {
+                    runCatching { onIncomingStored(state.value.publicKey, peer,
+                        state.value.conversations.firstOrNull { it.publicKey == peer }?.displayName.orEmpty()) }
+                }
             }
         }, { url, status -> mutable.update { if (current()) it.copy(connections = it.connections + (url to status)) else it } },
             { message -> mutable.update { if (current()) it.copy(error = message) else it } })

@@ -10,6 +10,7 @@ data class HistorySnapshot(val contacts: List<SavedContact> = emptyList(), val m
 class LocalHistoryException : RuntimeException("Local Internet history could not be opened or saved. Existing data was preserved.")
 
 interface InternetHistoryRepository {
+    suspend fun containsRumor(owner: String, id: String): Boolean = changes(owner, id, null).messages.isNotEmpty()
     suspend fun load(owner: String): HistorySnapshot
     suspend fun changes(owner: String, id: String?, peer: String?): HistorySnapshot {
         val snapshot = load(owner)

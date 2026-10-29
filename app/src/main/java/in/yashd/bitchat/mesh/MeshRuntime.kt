@@ -21,6 +21,7 @@ import org.json.JSONObject
 object MeshRuntime {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate +
         CoroutineExceptionHandler { _, _ -> addError("Nearby operation failed; existing data was preserved. Retry after checking Bluetooth and local storage.") })
+    private val notificationPackets = HashMap<String, Long>()
     private val seenPackets = LinkedHashMap<String, Long>()
     private val cryptoBox = CryptoBox()
 
@@ -31,6 +32,7 @@ object MeshRuntime {
     private lateinit var messageStore: MessageStore
 
     private var localIdentity: LocalIdentity? = null
+    private var receiveStartedAt = Long.MAX_VALUE
     private var transport: BleTransport? = null
     private var announceJob: Job? = null
 
@@ -74,6 +76,7 @@ object MeshRuntime {
             return@launch
         }
         if (transport != null) return@launch
+        receiveStartedAt = System.currentTimeMillis()
         transport = BleTransport(
             context = appContext,
             onPacket = { packet -> scope.launch { processTransportPacket(packet) } },
@@ -256,13 +259,22 @@ object MeshRuntime {
             decoded.payload
         }
         val json = runCatching { JSONObject(payload.decodeToString()) }.getOrNull() ?: return
-        runCatching { messageStore.addInbound(
+        val inserted = runCatching { messageStore.addInbound(
             packetIdHex = decoded.packetId.toHex(),
             senderId = decoded.senderId,
             recipientId = decoded.recipientId,
             body = json.optString("body"),
             isPrivate = encrypted
         ) }.getOrElse { addError("Nearby history is unavailable; existing data was preserved."); return }
+        val notificationNow = System.currentTimeMillis()
+        notificationPackets.entries.removeAll { it.value < notificationNow - 10 * 60_000 }
+        val firstReceipt = notificationPackets.put(decoded.packetId.toHex(), decoded.timestampMs) == null
+        if (inserted && firstReceipt && `in`.yashd.bitchat.notifications.NotificationPolicy.isLive(decoded.timestampMs, receiveStartedAt, System.currentTimeMillis())) {
+            val route = `in`.yashd.bitchat.nearbyRoute(if (encrypted) decoded.senderId else null)
+            val key = `in`.yashd.bitchat.ui.relay.MutedChatsStore.key("nearby", local.peerId, if (encrypted) decoded.senderId else null)
+            `in`.yashd.bitchat.notifications.MessageNotifications.stored(appContext, key, route,
+                if (encrypted) sender?.identity?.displayName.orEmpty() else "Nearby group")
+        }
         sendAck(decoded.senderId, decoded.packetId.toHex())
     }
 
