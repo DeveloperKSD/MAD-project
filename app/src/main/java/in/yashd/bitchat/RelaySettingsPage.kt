@@ -119,6 +119,8 @@ internal fun RelaySettingsPage(
             }
         }
 
+        item { DebugNotificationAction(toast) }
+
         // connection rows
         item {
             RelayCard(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {

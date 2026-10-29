@@ -18,7 +18,7 @@ object MessageNotifications {
     @Volatile var visibleRoute: String? = null
     @Volatile var foreground = false
     const val EXTRA_ROUTE = "message_conversation"
-    private const val CHANNEL = "incoming_messages_v1"
+    internal const val CHANNEL = "incoming_messages_v1"
 
     fun channels(context: Context) {
         if (Build.VERSION.SDK_INT >= 26) context.getSystemService(NotificationManager::class.java)
@@ -39,16 +39,21 @@ object MessageNotifications {
                 .setData(Uri.parse("relay://message/" + Uri.encode(key)))
                 .putExtra(EXTRA_ROUTE, route)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            val pending = PendingIntent.getActivity(context, 0, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            val public = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.relay_chat)
-                .setContentTitle("Relay").setContentText("New message").build()
-            val notification = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.relay_chat)
-                .setContentTitle(name.ifBlank { "Relay" }).setContentText("New message")
-                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(public)
-                .setAutoCancel(true).setContentIntent(pending).build()
-            NotificationManagerCompat.from(context).notify(key, 2001, notification)
+            post(context, key, intent, name.ifBlank { "Relay" }, "New message")
         }
+    }
+
+    /** Shared rendering for incoming messages and the debug-only explicit diagnostic. */
+    internal fun post(context: Context, key: String, intent: Intent, title: String, text: String) {
+        val pending = PendingIntent.getActivity(context, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val public = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.relay_chat)
+            .setContentTitle("Relay").setContentText("New message").build()
+        val notification = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.relay_chat)
+            .setContentTitle(title).setContentText(text)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setPublicVersion(public)
+            .setAutoCancel(true).setContentIntent(pending).build()
+        NotificationManagerCompat.from(context).notify(key, 2001, notification)
     }
 
     fun consume(intent: Intent?): String? {
