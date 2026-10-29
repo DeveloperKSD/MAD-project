@@ -82,7 +82,8 @@ class MainActivity : ComponentActivity() {
         )
         MeshRuntime.initialize(applicationContext)
         setContent {
-            RelayMeshHost(internetModel)
+            // Splash and onboarding from the Figma (RelayStart.kt), then the app as before.
+            RelayStartFlow { RelayMeshHost(internetModel) }
         }
     }
 

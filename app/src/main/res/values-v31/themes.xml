@@ -2,7 +2,8 @@
 <resources>
 
     <style name="Theme.Bitchat" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:windowSplashScreenBackground">@color/black</item>
-        <item name="android:windowSplashScreenAnimatedIcon">@drawable/bitchat_logo</item>
+        <!-- Relay blue with no icon, so launch flows straight into the Figma splash (RelayStart.kt). -->
+        <item name="android:windowSplashScreenBackground">#FF3E67E2</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/relay_splash_blank</item>
     </style>
 </resources>
