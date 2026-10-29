@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
@@ -39,7 +40,8 @@ object MeshRuntime {
     private lateinit var messageStore: MessageStore
 
     @Volatile private var localIdentity: LocalIdentity? = null
-    private val fileScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1) +
+    private val fileDispatcher = Dispatchers.IO.limitedParallelism(1)
+    private val fileScope = CoroutineScope(SupervisorJob() + fileDispatcher +
         CoroutineExceptionHandler { _, _ -> addError("File transfer paused; saved files were preserved.") })
     private val fileInbox = Channel<TransportPacket>(32)
     private var fileController: BleFileController? = null
@@ -216,7 +218,7 @@ object MeshRuntime {
         if (!accepted) addError("No Nearby link accepted the message. Turn on Nearby and retry.")
     }
 
-    /** Stage 2A developer/service APIs only. No attachment button or production UI is wired.
+    /** Original Stage 2A service APIs; Stage 2B UI uses the result-bearing APIs below.
      * Caller owns source/output streams and must keep them valid until the returned Job ends.
      */
     fun offerFile(peerId: String, source: InputStream, multiHop: Boolean = false) = fileAction {
@@ -230,6 +232,28 @@ object MeshRuntime {
     fun cancelFile(id: UUID) = fileAction { it.cancel(id) }
     fun discardFile(id: UUID) = fileAction { it.discard(id) }
     fun copyCompletedFile(id: UUID, output: OutputStream) = fileAction { it.copyCompletedTo(id, output) }
+
+    // Result-bearing UI APIs share the same serialized lane as packets, timers and teardown.
+    private suspend fun <T> fileResult(action: (BleFileController) -> T): Result<T> = withContext(fileDispatcher) {
+        try { runCatching { action(files()) } }
+        finally { fileController?.let { fileState.value = it.state.value } }
+    }
+    suspend fun reloadFileTransfers(): Result<Unit> = fileResult { Unit }
+    suspend fun offerAttachment(peerId: String, source: InputStream, multiHop: Boolean): Result<UUID> = fileResult {
+        check(!forwardingFiles.busy(System.currentTimeMillis())) { "Another transfer owns this device" }
+        it.offer(peerId, source, if (multiHop) TransferProfile.MULTI_HOP_BLE else TransferProfile.DIRECT_BLE)
+    }
+    suspend fun copyVerifiedAttachment(id: UUID, output: OutputStream): Result<Unit> = fileResult { it.copyCompletedTo(id, output) }
+    suspend fun attachmentAction(id: UUID, action: BleFileAction): Result<Unit> = fileResult {
+        when (action) {
+            BleFileAction.ACCEPT -> { check(!forwardingFiles.busy(System.currentTimeMillis())); it.accept(id) }
+            BleFileAction.REJECT -> it.reject(id)
+            BleFileAction.PAUSE -> it.pause(id)
+            BleFileAction.RESUME -> { check(!forwardingFiles.busy(System.currentTimeMillis())); it.resume(id) }
+            BleFileAction.CANCEL -> it.cancel(id)
+            BleFileAction.DISCARD -> it.discard(id)
+        }
+    }
 
     private fun fileAction(action: (BleFileController) -> Unit) = fileScope.launch {
         runCatching { action(files()) }.onFailure { addError("File action failed or paused; saved files were preserved. Check consent, size limits, and link availability.") }

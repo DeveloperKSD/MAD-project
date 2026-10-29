@@ -205,4 +205,21 @@ class BleFileControllerTest {
         assertEquals(BleFilePhase.COMPLETED, phase(n.a))
     }
 
+    @Test fun corruptExportUpdatesCompletedCardToFailed() = BleFileTestNetwork(temp.newFolder()).use { n ->
+        val id = start(n); n.drain()
+        java.io.RandomAccessFile(n.payload(n.bob, id), "rw").use { it.write(99) }
+        assertThrows(Exception::class.java) { n.b.copyCompletedTo(id, ByteArrayOutputStream()) }
+        assertEquals(BleFilePhase.FAILED, phase(n.b))
+    }
+    @Test fun rejectingResumeCleansPartialPayloadAndKeepsADiscardableRecord() = BleFileTestNetwork(temp.newFolder()).use { n ->
+        val id = start(n); n.deliverOne(); n.deliverOne()
+        n.wire.clear(); n.a.linkLost(); n.b.linkLost()
+        n.a.resume(id); n.drain()
+        assertEquals(BleFilePhase.AWAITING_ACCEPTANCE, phase(n.b))
+        n.b.reject(id); n.drain()
+        assertEquals(BleFilePhase.REJECTED, phase(n.b))
+        assertFalse(n.payload(n.bob, id).exists())
+        n.b.discard(id); assertTrue(n.b.state.value.isEmpty())
+    }
+
 }

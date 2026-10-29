@@ -106,7 +106,10 @@ class BleFileController(
         emit(binding, BleFileCode.REJECT, byteArrayOf())
         denied[id] = clock() + 660_000
         while (denied.size > 64) denied.remove(denied.keys.first())
-        bindings.remove(id); persist() // An unaccepted offer must not consume payload/history slots.
+        val partial = snapshotOrNull(id)
+        if (partial == null) bindings.remove(id) // A first offer allocated no payload.
+        else if (partial.state !in setOf(TransferState.CANCELLED, TransferState.FAILED, TransferState.COMPLETED)) engine.cancel(id)
+        persist() // A rejected resume retains a terminal record so its checkpoint can be discarded.
     }
     @Synchronized fun pause(id: UUID) { healthy(); pauseBinding(binding(id), true) }
     @Synchronized fun cancel(id: UUID) {
@@ -131,7 +134,17 @@ class BleFileController(
         while (denied.size > 64) denied.remove(denied.keys.first())
         persist()
     }
-    @Synchronized fun copyCompletedTo(id: UUID, output: OutputStream) { healthy(); engine.copyCompletedTo(id, output) }
+    @Synchronized fun copyCompletedTo(id: UUID, output: OutputStream) {
+        healthy()
+        try { engine.copyCompletedTo(id, output) }
+        catch (e: Exception) {
+            if (snapshotOrNull(id)?.state == TransferState.FAILED) {
+                binding(id).phase = BleFilePhase.FAILED
+                try { persist() } catch (storage: Exception) { e.addSuppressed(storage) }
+            }
+            throw e
+        }
+    }
     @Synchronized fun linkLost() { bindings.values.filter { !terminal(it.phase) }.forEach { pauseBinding(it, false) } }
 
     /** Invalid or unauthenticated packets have no state, file, ACK, or queue side effects. */
@@ -355,7 +368,7 @@ class BleFileController(
     }
     private fun publish() {
         mutable.value = bindings.values.map { BleFileStatus(it.manifest.id, it.remote.peerId, it.phase, it.outgoing,
-            snapshotOrNull(it.manifest.id)?.confirmedBytes ?: 0, it.manifest.sizeBytes) }
+            snapshotOrNull(it.manifest.id)?.confirmedBytes ?: 0, it.manifest.sizeBytes, it.profile) }
     }
     @Synchronized override fun close() {
         if (closed) return

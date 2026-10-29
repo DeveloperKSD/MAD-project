@@ -7,7 +7,7 @@ import java.util.UUID
 
 enum class BleFilePhase { OFFERED, AWAITING_ACCEPTANCE, SENDING, RECEIVING, PAUSED, COMPLETED, CANCELLED, REJECTED, FAILED }
 data class BleFileStatus(val id: UUID, val peer: String, val phase: BleFilePhase, val outgoing: Boolean,
-                         val confirmedBytes: Long, val totalBytes: Long)
+                         val confirmedBytes: Long, val totalBytes: Long, val profile: TransferProfile = TransferProfile.DIRECT_BLE)
 
 /** No private identity keys. Full public keys pin the endpoint across resume/reconnect.
  * Epoch/acceptance challenges are never inferred from untrusted file DATA.
@@ -21,3 +21,6 @@ interface BleFileBindingStore {
     /** Must commit the complete bounded list before returning; failure must propagate. */
     fun save(bindings: List<BleFileBinding>)
 }
+
+/** UI operations deliberately exclude terminal retry: it requires a newly selected file/UUID. */
+enum class BleFileAction { ACCEPT, REJECT, PAUSE, RESUME, CANCEL, DISCARD }
