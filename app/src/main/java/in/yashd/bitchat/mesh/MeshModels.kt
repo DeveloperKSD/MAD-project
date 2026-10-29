@@ -85,7 +85,9 @@ enum class PacketType(val value: Int) {
     ACK(0x12),
     FRAGMENT(0x20),
     PING(0x30),
-    PONG(0x31);
+    PONG(0x31),
+    FILE_CONTROL(0x40),
+    FILE_CHUNK(0x41);
 
     companion object {
         fun fromValue(value: Int): PacketType? = entries.firstOrNull { it.value == value }
