@@ -79,7 +79,7 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
     }
     LaunchedEffect(pickerRequest) { if (pickerRequest > handledRequest) { handledRequest = pickerRequest; picker = true } }
     LaunchedEffect(files.map { it.id to it.phase }) {
-        files.filter { it.phase == BleFilePhase.COMPLETED && ui.previews[it.id] == null }.forEach { model.quietPreview(it) }
+        files.filter { galleryEligible(it) && ui.previews[it.id] == null }.forEach { model.quietPreview(it) }
     }
 
     // Picker: a sheet matching the New Chat sheet, not a dialog.
@@ -111,24 +111,24 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
     if (ui.busy) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("Checking attachment…", color = RelayColors.TextSecondary) }
     (loadError ?: ui.message)?.let { Text(it, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = RelayColors.TextSecondary) }
 
-    // Transcript keeps only a compact summary per transfer; detail/actions live in the sheet.
-    if (files.isNotEmpty()) {
-        Text("Shared media", color = RelayColors.TextSecondary, fontSize = RelayType.Label,
-            modifier = Modifier.padding(start = 16.dp, top = 8.dp))
-        }
+    // Pending/active transfers stay compact summaries; completed transfers become media bubbles.
+    val active = files.filter { !galleryEligible(it) }
+    val completed = files.filter { galleryEligible(it) }
     if (files.isNotEmpty()) LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp).testTag("nearby-attachments"),
         contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(files, key = { it.id.toString() }) { file ->
+        items(active, key = { it.id.toString() }) { file ->
             TransferSummaryRow(file, ui.previews[file.id]?.kind, ui.labels[file.id],
-                preview = ui.previews[file.id]?.bitmap,
-                onOpen = { detailId = file.id.toString() },
-                onView = { viewerIndex = files.filter { it.phase == BleFilePhase.COMPLETED && !it.outgoing }.indexOfFirst { it.id == file.id } })
+                onOpen = { detailId = file.id.toString() })
+        }
+        items(completed, key = { it.id.toString() }) { file ->
+            MediaBubble(file, ui.previews[file.id]?.bitmap, ui.previews[file.id]?.kind, ui.labels[file.id],
+                mine = file.outgoing, onView = { viewerIndex = completed.indexOf(file) })
         }
     }
 
     // Full-screen viewer with left/right swipe across verified received images.
     if (viewerIndex >= 0) {
-        val viewable = files.filter { it.phase == BleFilePhase.COMPLETED }
+        val viewable = files.filter { galleryEligible(it) }
         if (viewable.isEmpty()) viewerIndex = -1
         else AttachmentPagerViewer(viewable, ui.previews, viewerIndex, model::quietPreview) { viewerIndex = -1 }
     }
@@ -138,7 +138,7 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
         if (file == null) detailId = null else ModalBottomSheet(onDismissRequest = { detailId = null }, containerColor = RelayColors.Card) {
             TransferDetail(file, connected, ui.busy, ui.labels[file.id], ui.previews[file.id], ui.message,
                 onAction = { model.action(file, it) }, onPreview = { model.preview(file) },
-                onView = { viewerIndex = files.filter { it.phase == BleFilePhase.COMPLETED }.indexOfFirst { it.id == file.id } },
+                onView = { viewerIndex = files.filter { galleryEligible(it) }.indexOfFirst { it.id == file.id } },
                 onSave = { verified ->
                     destinationId = file.id.toString()
                     val name = "attachment-${file.id.toString().take(8)}.${verified.kind.extension}"
@@ -154,8 +154,7 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
 
 /** Compact transcript row: kind icon, honest name, state and live progress. Controls live only in the detail sheet. */
 @Composable
-internal fun TransferSummaryRow(file: BleFileStatus, kind: AttachmentKind?, filename: String?,
-    preview: android.graphics.Bitmap? = null, onOpen: () -> Unit, onView: () -> Unit = {}) {
+internal fun TransferSummaryRow(file: BleFileStatus, kind: AttachmentKind?, filename: String?, onOpen: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -176,10 +175,6 @@ internal fun TransferSummaryRow(file: BleFileStatus, kind: AttachmentKind?, file
                 DotLabel(transferStateLabel(file.phase), transferStateColor(file.phase))
             }
             RIcon(R.drawable.relay_chevron, "Transfer details", tint = RelayColors.TextMuted, size = 18.dp)
-        }
-        preview?.let { bmp ->
-            Image(bmp.asImageBitmap(), "Verified received image",
-                Modifier.fillMaxWidth().heightIn(max = 160.dp).clip(RoundedCornerShape(10.dp)).clickable(onClick = onView))
         }
         if (file.phase == BleFilePhase.SENDING || file.phase == BleFilePhase.RECEIVING) {
             val progress = transferProgress(file.confirmedBytes, file.totalBytes)
@@ -266,6 +261,38 @@ internal fun NearbyAttachmentConfirmation(draft: PickedAttachment, recipient: St
         }
     }, confirmButton = { TextButton(enabled = connected && !busy, onClick = send) { Text(if (busy) "Preparing…" else "Send offer") } },
         dismissButton = { TextButton(enabled = !busy, onClick = dismiss) { Text("Cancel selection") } })
+}
+
+/** Chat media bubble for a completed transfer: images render in a direction-aligned bubble,
+ * PDFs show an honest file row. Tapping opens the swipe viewer. */
+@Composable
+internal fun MediaBubble(file: BleFileStatus, bitmap: android.graphics.Bitmap?, kind: AttachmentKind?, filename: String?,
+    mine: Boolean, onView: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+        Column(
+            Modifier
+                .clip(RoundedCornerShape(14.dp))
+                .background(if (mine) RelayColors.BlueBubble else RelayColors.Card)
+                .clickable(onClick = onView)
+                .padding(4.dp)
+        ) {
+            if (bitmap != null) {
+                Image(bitmap.asImageBitmap(), if (mine) "Sent image" else "Received image",
+                    Modifier.widthIn(max = 240.dp).heightIn(max = 280.dp).clip(RoundedCornerShape(12.dp)))
+            } else {
+                Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    RIcon(
+                        if (kind == AttachmentKind.JPEG || kind == AttachmentKind.PNG) R.drawable.relay_image else R.drawable.relay_storage,
+                        null, tint = RelayColors.TextSecondary, size = 22.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(transferDisplayName(file.outgoing, filename, kind), color = RelayColors.TextPrimary, fontSize = 15.sp)
+                        Text("Verified", color = RelayColors.TextSecondary, fontSize = RelayType.Meta)
+                    }
+                }
+            }
+        }
+    }
 }
 
 /** Full-screen swipeable viewer for verified received attachments (images render, PDFs note honestly). */

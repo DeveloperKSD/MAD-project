@@ -27,6 +27,9 @@ internal fun transferDisplayName(outgoing: Boolean, label: String?, kind: Attach
 internal fun transferProgress(confirmedBytes: Long, totalBytes: Long): Float =
     if (totalBytes <= 0L) 0f else (confirmedBytes.toFloat() / totalBytes).coerceIn(0f, 1f)
 
+/** Gallery/viewer membership: any completed transfer, both directions (payloads are retained until discard). */
+internal fun galleryEligible(file: BleFileStatus): Boolean = file.phase == BleFilePhase.COMPLETED
+
 internal fun isTerminalPhase(phase: BleFilePhase): Boolean =
     phase in setOf(BleFilePhase.COMPLETED, BleFilePhase.FAILED, BleFilePhase.CANCELLED, BleFilePhase.REJECTED)
 

@@ -40,6 +40,14 @@ class TransferPresentationTest {
         assertEquals(1f, transferProgress(200, 100))
     }
 
+    @Test fun galleryIncludesCompletedTransfersInBothDirections() {
+        assert(galleryEligible(status(BleFilePhase.COMPLETED, outgoing = true)))
+        assert(galleryEligible(status(BleFilePhase.COMPLETED, outgoing = false)))
+        BleFilePhase.entries.filter { it != BleFilePhase.COMPLETED }.forEach {
+            assert(!galleryEligible(status(it))) { it.name }
+        }
+    }
+
     @Test fun notificationTextOnlyForActiveTransfers() {
         assertNull(transferNotificationText(emptyList()))
         assertNull(transferNotificationText(listOf(status(BleFilePhase.COMPLETED))))

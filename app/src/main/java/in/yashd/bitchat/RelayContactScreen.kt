@@ -30,10 +30,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.activity.compose.rememberLauncherForActivityResult
+import `in`.yashd.bitchat.attachments.transferDisplayName
 import androidx.lifecycle.ViewModelProvider
 import `in`.yashd.bitchat.attachments.NearbyAttachmentModel
 import `in`.yashd.bitchat.mesh.MeshRuntime
-import `in`.yashd.bitchat.transfer.ble.BleFilePhase
+import `in`.yashd.bitchat.attachments.galleryEligible
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.Modifier
@@ -220,15 +222,23 @@ internal fun RelayContactScreen(
                 val attachmentModel = remember(context) { ViewModelProvider(context.activity())[NearbyAttachmentModel::class.java] }
                 val attachmentUi by attachmentModel.state.collectAsState()
                 val allTransfers by MeshRuntime.fileTransfers.collectAsState()
-                val media = allTransfers.filter { it.peer == info.target && it.phase == BleFilePhase.COMPLETED }
+                val media = allTransfers.filter { it.peer == info.target && galleryEligible(it) }
                 var viewerStart by remember { mutableStateOf(-1) }
                 LaunchedEffect(media.map { it.id }) {
                     media.filter { attachmentUi.previews[it.id] == null }.forEach { attachmentModel.quietPreview(it) }
                 }
+                var saveId by remember { mutableStateOf<String?>(null) }
+                var saveExt by remember { mutableStateOf("pdf") }
+                val saveLauncher = rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+                    val id = saveId; saveId = null
+                    if (uri != null && id != null) attachmentModel.save(uri, java.util.UUID.fromString(id))
+                }
                 val images = media.filter { attachmentUi.previews[it.id]?.bitmap != null }
-                if (images.isEmpty()) {
+                val documents = media.filter { attachmentUi.previews[it.id]?.kind == `in`.yashd.bitchat.attachments.AttachmentKind.PDF }
+                if (images.isEmpty() && documents.isEmpty()) {
                     Text(
-                        "Verified photos you share will show up here.",
+                        "Verified files you share will show up here.",
                         modifier = Modifier.padding(top = 4.dp, start = 4.dp),
                         color = RelayColors.TextMuted,
                         fontSize = 12.sp
@@ -251,6 +261,24 @@ internal fun RelayContactScreen(
                                 repeat(3 - rowItems.size) { Spacer(Modifier.weight(1f)) }
                             }
                         }
+                    }
+                }
+                documents.forEach { file ->
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(RelayColors.Card).padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RIcon(R.drawable.relay_storage, null, tint = RelayColors.TextSecondary, size = 22.dp)
+                        Spacer(Modifier.padding(6.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(transferDisplayName(file.outgoing, attachmentUi.labels[file.id], `in`.yashd.bitchat.attachments.AttachmentKind.PDF),
+                                color = RelayColors.TextPrimary, fontSize = 15.sp)
+                            Text("PDF verified. Open saved PDFs only with a trusted viewer.", color = RelayColors.TextMuted, fontSize = 12.sp)
+                        }
+                        TextButton(onClick = {
+                            saveId = file.id.toString()
+                            saveLauncher.launch("attachment-${file.id.toString().take(8)}.pdf")
+                        }) { Text("Save") }
                     }
                 }
                 if (viewerStart >= 0) {
