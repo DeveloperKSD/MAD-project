@@ -15,6 +15,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import `in`.yashd.bitchat.RelayColors
+import `in`.yashd.bitchat.RelayType
 import `in`.yashd.bitchat.nostr.NostrMessagingCoordinator
 import java.net.URI
 
@@ -30,7 +32,7 @@ fun InternetSetupScreen(state: RelayUiState, updateServers: (String, String) -> 
             Text("Internet Setup", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             Text("Step ${setup.step + 1} of 3", style = MaterialTheme.typography.bodySmall)
             Text(listOf("Choose your servers", "Make yourself reachable", "Share your Relay ID")[setup.step],
-                style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                color = RelayColors.TextPrimary, fontSize = RelayType.SubTitle, fontWeight = FontWeight.SemiBold)
         }
         when (setup.step) {
             0 -> {
@@ -49,7 +51,7 @@ fun InternetSetupScreen(state: RelayUiState, updateServers: (String, String) -> 
             1 -> {
                 item { Text("Publish an inbox announcement so friends’ apps know which servers to send to. This shares your public ID and chosen inbox addresses, never your private key.") }
                 item { SetupStatus(state) }
-                item { Text("Inbox server connections", style = MaterialTheme.typography.titleMedium) }
+                item { Text("Inbox server connections", color = RelayColors.TextPrimary, fontSize = RelayType.Body, fontWeight = FontWeight.SemiBold) }
                 items(state.inboxes.size) { index ->
                     val url = state.inboxes[index]
                     Text("${serverLabel(url)} · ${state.connections[url] ?: if (state.active) "waiting" else "disconnected"}", style = MaterialTheme.typography.bodySmall)
@@ -100,7 +102,7 @@ fun InternetSetupScreen(state: RelayUiState, updateServers: (String, String) -> 
 fun SetupStatus(state: RelayUiState) {
     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(if (state.readyToShare) "Ready to share your ID" else "Not yet ready", style = MaterialTheme.typography.titleMedium)
+            Text(if (state.readyToShare) "Ready to share your ID" else "Not yet ready", color = RelayColors.TextPrimary, fontSize = RelayType.Body, fontWeight = FontWeight.SemiBold)
             Text(if (state.inboxes.isEmpty()) "Servers: not configured" else "Servers: configured")
             Text(when {
                 state.inboxes.isEmpty() -> "Inbox connections: not configured"
@@ -129,7 +131,7 @@ fun PublicRelayId(npub: String) {
     var shareError by remember { mutableStateOf(false) }
     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Your public Relay ID", style = MaterialTheme.typography.titleMedium)
+            Text("Your public Relay ID", color = RelayColors.TextPrimary, fontSize = RelayType.Body, fontWeight = FontWeight.SemiBold)
             Text(npub.ifEmpty { "Loading your secure identity…" }, style = MaterialTheme.typography.bodySmall)
             Text("Public ID only · safe to share with friends", style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {

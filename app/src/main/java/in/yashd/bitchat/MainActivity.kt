@@ -140,7 +140,7 @@ private fun RelayMeshHost(model: `in`.yashd.bitchat.ui.relay.RelayViewModel, not
             item {
                 var advanced by rememberSaveable { mutableStateOf(false) }
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Nearby connection", style = MaterialTheme.typography.titleMedium)
+                    Text("Nearby connection", color = RelayColors.TextPrimary, fontSize = RelayType.Body, fontWeight = FontWeight.SemiBold)
                     Text(if (!state.bluetoothReadiness.hasBle) "Nearby isn’t available on this device. Internet messaging still works." else if (state.serviceRunning) "Nearby is on" else "Nearby is off", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (!state.bluetoothReadiness.hasPermissions) TextButton(onClick = request) { Text("Allow Bluetooth") }
                     TextButton(onClick = bluetoothSettings) { Text("Open Bluetooth settings") }
@@ -209,8 +209,9 @@ private fun IdentityPanel(
                 ) {
                     Text(
                         text = name,
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onSurface,
+                        color = RelayColors.TextPrimary,
+                        fontSize = RelayType.SubTitle,
+                        fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )

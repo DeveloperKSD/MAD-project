@@ -11,6 +11,8 @@ import androidx.compose.ui.Modifier
 import kotlinx.coroutines.launch
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import `in`.yashd.bitchat.RelayColors
+import `in`.yashd.bitchat.RelayType
 
 @Composable
 fun OnlineChatScreen(add: suspend (String, String) -> String?, open: (String) -> Unit, back: () -> Unit, setup: () -> Unit, canSave: Boolean = true) {
@@ -21,7 +23,7 @@ fun OnlineChatScreen(add: suspend (String, String) -> String?, open: (String) ->
     var name by remember { mutableStateOf("") }
     var problem by rememberSaveable { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Text("Chat Online", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text("Chat Online", color = RelayColors.TextPrimary, fontSize = RelayType.SubTitle, fontWeight = FontWeight.SemiBold)
         Text("Paste your friend’s public Relay ID. They only need to share it once; this conversation saves it on this device.")
         OutlinedTextField(publicId, { publicId = it; problem = null }, Modifier.fillMaxWidth(), singleLine = true,
             label = { Text("Friend’s public Relay ID (npub)") }, shape = RoundedCornerShape(18.dp), isError = problem != null)
