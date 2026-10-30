@@ -46,6 +46,8 @@ fun OnlineChatScreen(add: suspend (String, String) -> String?, open: (String) ->
     // Sensitive contact metadata must not enter plaintext Android saved state.
     var name by remember { mutableStateOf("") }
     var problem by rememberSaveable { mutableStateOf<String?>(null) }
+    var showQr by rememberSaveable { mutableStateOf(false) }
+    var scanning by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("New Internet chat", color = RelayColors.TextPrimary, fontSize = RelayType.SubTitle, fontWeight = FontWeight.SemiBold)
 
@@ -72,14 +74,28 @@ fun OnlineChatScreen(add: suspend (String, String) -> String?, open: (String) ->
                 }
                 Text("Friends need this public ID to reach you. It is not a username and never reveals your name or private key.",
                     color = RelayColors.TextMuted, fontSize = RelayType.Meta)
+                if (npub.isNotEmpty()) {
+                    TextButton(onClick = { showQr = !showQr }) { Text(if (showQr) "Hide QR code" else "Show QR code") }
+                    if (showQr) QrImage(npub)
+                }
             }
             RowDivider(startPadding = 16.dp)
             RelayListRow(R.drawable.relay_broadcast, "Internet setup", inboxSummary ?: "Relays that deliver your messages",
                 iconTint = RelayColors.Nostr, onClick = setup)
         }
 
-        Text("Paste your friend’s Internet ID. They only need to share it once; this conversation saves it on this device.",
+        if (scanning) {
+            QrScannerScreen(onResult = { scanned ->
+                scanning = false
+                val parsed = parseScannedPublicId(scanned)
+                if (parsed == null) problem = "That QR code isn’t a Relay Internet ID. Ask your friend to show the QR from their Internet chat screen."
+                else { publicId = parsed; problem = null }
+            }, onClose = { scanning = false })
+            return@Column
+        }
+        Text("Paste your friend’s Internet ID, or scan the QR code on their phone. They only need to share it once; this conversation saves it on this device.",
             color = RelayColors.TextSecondary, fontSize = RelayType.Label)
+        OutlinedButton(onClick = { scanning = true }, modifier = Modifier.fillMaxWidth()) { Text("Scan QR code") }
         OutlinedTextField(publicId, { publicId = it; problem = null }, Modifier.fillMaxWidth(), singleLine = true,
             label = { Text("Friend’s Internet ID (npub)") }, shape = RoundedCornerShape(18.dp), isError = problem != null)
         problem?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = RelayType.Meta) }

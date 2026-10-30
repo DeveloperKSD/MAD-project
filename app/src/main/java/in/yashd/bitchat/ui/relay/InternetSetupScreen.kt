@@ -173,7 +173,7 @@ private fun publicationLabel(stage: NostrMessagingCoordinator.Stage): String = w
 
 
 @Composable
-private fun QrImage(contents: String) {
+internal fun QrImage(contents: String) {
     val bitmap = remember(contents) {
         runCatching {
             val size = 512
