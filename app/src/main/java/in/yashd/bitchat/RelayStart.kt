@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -128,7 +129,7 @@ fun RelayStartFlow(content: @Composable () -> Unit) {
         if (!done && existing) prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
         !done && !existing
     }
-    // "splash" -> ("username" -> "onboarding" on first run) -> "app".
+    // "splash" -> ("onboarding" -> "username" on first run) -> "app".
     var step by rememberSaveable { mutableStateOf("splash") }
     Crossfade(targetState = step, animationSpec = tween(350), label = "relay-start") { current ->
         when (current) {
@@ -136,19 +137,17 @@ fun RelayStartFlow(content: @Composable () -> Unit) {
                 RelayDesignTheme { RelaySplashScreen() }
                 LaunchedEffect(Unit) {
                     delay(SPLASH_MILLIS)
-                    step = if (firstRun) "username" else "app"
+                    step = if (firstRun) "onboarding" else "app"
                 }
+            }
+            "onboarding" -> RelayDesignTheme {
+                RelayOnboarding(onFinish = { step = "username" })
             }
             "username" -> RelayDesignTheme {
                 RelayUsernameScreen(onContinue = { name ->
                     prefs.edit().putString(KEY_USERNAME, name).apply()
-                    `in`.yashd.bitchat.mesh.MeshRuntime.renameSelf(name)
-                    step = "onboarding"
-                })
-            }
-            "onboarding" -> RelayDesignTheme {
-                RelayOnboarding(onFinish = {
                     prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
+                    `in`.yashd.bitchat.mesh.MeshRuntime.renameSelf(name)
                     step = "app"
                 })
             }
@@ -157,26 +156,27 @@ fun RelayStartFlow(content: @Composable () -> Unit) {
     }
 }
 
-/** First run only, on the blue start screen: the name friends will see for this device. */
+/** First run only, after the intro pages: the name friends will see for this device.
+ * Same black background, typography and button style as the onboarding pages. */
 @Composable
 internal fun RelayUsernameScreen(onContinue: (String) -> Unit) {
     var name by rememberSaveable { mutableStateOf("") }
-    Box(Modifier.fillMaxSize().background(SplashBlue)) {
+    Box(Modifier.fillMaxSize().background(OnboardingBackground).imePadding()) {
         Column(
             Modifier.align(Alignment.Center).padding(horizontal = 47.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Image(
-                painter = painterResource(R.drawable.relay_logo),
-                contentDescription = "Relay",
-                modifier = Modifier.size(116.dp, 39.dp)
-            )
-            Spacer(Modifier.height(48.dp))
             Text(
                 "What should friends call you?",
-                color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold
+                color = Color.White, fontSize = 31.sp, fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
             )
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "This name is shown to people nearby.",
+                color = OnboardingGray, fontSize = 14.sp, textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(32.dp))
             BasicTextField(
                 value = name,
                 onValueChange = { name = it.take(40) },
@@ -189,8 +189,18 @@ internal fun RelayUsernameScreen(onContinue: (String) -> Unit) {
                     .fillMaxWidth()
                     .height(50.dp)
                     .clip(RoundedCornerShape(50))
-                    .background(Color.White)
-                    .wrapContentSize(Alignment.Center)
+                    .background(Color.White),
+                decorationBox = { inner ->
+                    Box(
+                        Modifier.fillMaxSize().padding(horizontal = 24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (name.isEmpty()) {
+                            Text("Your name", color = DotGray, fontSize = 16.sp)
+                        }
+                        inner()
+                    }
+                }
             )
             Spacer(Modifier.height(16.dp))
             Box(
