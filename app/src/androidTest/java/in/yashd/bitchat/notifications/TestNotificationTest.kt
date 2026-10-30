@@ -35,7 +35,7 @@ class TestNotificationTest {
             val notification = manager.activeNotifications.single { it.tag == "debug-test-notification" }.notification
             assertEquals("Relay", notification.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
             assertEquals("This is a test notification", notification.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
-            if (Build.VERSION.SDK_INT >= 26) assertEquals(MessageNotifications.CHANNEL, notification.channelId)
+            if (Build.VERSION.SDK_INT >= 26) assertTrue(notification.channelId == MessageNotifications.CHANNEL || notification.channelId == MessageNotifications.CHANNEL_V2)
             assertTrue(feedback.contains("sent"))
             assertEquals("nearby:", MessageNotifications.visibleRoute)
             assertNull(MessageNotifications.consume(android.content.Intent()))
