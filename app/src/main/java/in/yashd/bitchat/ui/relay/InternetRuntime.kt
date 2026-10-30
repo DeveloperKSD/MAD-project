@@ -65,8 +65,10 @@ data class InternetMessage(val id: String, val peer: String, val body: String,
                            val outgoing: Boolean, val status: String, val createdAtMs: Long = 0, val rumorId: String? = null)
 data class InternetConversation(val publicKey: String, val npub: String, val displayName: String = "", val lastMessageAtMs: Long? = null)
 enum class InboxAnnouncement { NOT_PUBLISHED, PUBLISHING, ACCEPTED, PARTIAL, FAILED, UNKNOWN }
+// Discovery publishes to both relays; only nos.lol is a default inbox because relay.damus.io
+// requires NIP-42 auth for subscriptions and would always report a failed inbox connection.
 internal val DEFAULT_DISCOVERY_RELAYS = listOf("wss://relay.damus.io", "wss://nos.lol")
-internal val DEFAULT_INBOX_RELAYS = DEFAULT_DISCOVERY_RELAYS
+internal val DEFAULT_INBOX_RELAYS = listOf("wss://nos.lol")
 
 data class InternetSetupState(
     val step: Int = 0, val discoveryDraft: String = "", val inboxDraft: String = "",
