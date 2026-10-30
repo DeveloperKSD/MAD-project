@@ -95,11 +95,12 @@ fun RelayHome(
     var setupOpen by rememberSaveable { mutableStateOf(false) }
     var nearbyDetails by rememberSaveable { mutableStateOf(false) }
     var newChat by remember { mutableStateOf(false) }
-    // Mutes persist independently; unread markers remain session-local.
+    // Mutes persist independently; unread markers persist encrypted across restarts.
     val muteContext = LocalContext.current
     val muteStore = remember { `in`.yashd.bitchat.ui.relay.MutedChatsStore(muteContext) }
     val savedMutes by muteStore.mutes.collectAsState()
-    val seenAt = remember { mutableStateMapOf<String, Long>() }
+    val seenStore = remember { `in`.yashd.bitchat.ui.relay.LastReadStore(muteContext) }
+    val savedSeen by seenStore.seen.collectAsState()
     // Favourites and pins are stored independently and encrypted across restarts.
     val context = LocalContext.current
     val favoriteStore = remember { FavoriteChatsStore(context) }
@@ -127,7 +128,7 @@ fun RelayHome(
             model.loadConversation(routeTarget(chatRoute).orEmpty())
         }
     }
-    val items = buildChatList(internet, mesh, seenAt, sessionStart)
+    val items = buildChatList(internet, mesh, savedSeen, sessionStart)
     fun favoriteKey(route: String): String? = runCatching {
         if (routeIsNearby(route)) FavoriteChatsStore.key("nearby", mesh.localPeerId, routeTarget(route))
         else FavoriteChatsStore.key("internet", internet.publicKey,
@@ -172,7 +173,7 @@ fun RelayHome(
                 pinStore.remove(route)
                 messagePinStore.removeChat(route)
                 // Keep mute preferences when deleting history.
-                seenAt.remove(route)
+                seenStore.remove(route)
                 if (chat == route) chat = null
                 if (contact == route) contact = null
                 toast(if (removed) "Chat deleted" else "Chat deleted, but saved favorites could not be updated. Existing favorites were preserved.")
@@ -279,7 +280,7 @@ fun RelayHome(
                         sendInternet = model::send,
                         openSetup = { setupOpen = true },
                         openDiscover = { goTab(1) },
-                        markSeen = { seenAt[chatRoute] = System.currentTimeMillis() },
+                        markSeen = { seenStore.mark(chatRoute) },
                         toast = toast,
                         olderMessages = { model.loadConversation(chatRoute.substringAfter(':'), older = true) },
                         latestMessages = { model.loadConversation(chatRoute.substringAfter(':')) },
@@ -310,6 +311,10 @@ fun RelayHome(
                             scope.launch {
                                 refreshing = true
                                 refreshedAt = System.currentTimeMillis()
+                                // Real refresh: re-announce + flush queued Nearby messages,
+                                // reconnect or re-subscribe the Internet inbox.
+                                MeshRuntime.refreshNow()
+                                model.refresh()
                                 delay(1_000)
                                 refreshing = false
                             }
