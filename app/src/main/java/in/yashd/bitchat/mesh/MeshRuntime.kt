@@ -223,6 +223,14 @@ object MeshRuntime {
         return accepted
     }
 
+    /** Pull-to-refresh: re-check Bluetooth, re-announce and retry queued messages. */
+    fun refreshNow() = scope.launch {
+        if (!::appContext.isInitialized) return@launch
+        refreshReadiness()
+        sendAnnouncement()
+        flushQueued()
+    }
+
     /** Retries every queued message: on new links, on announcements and on the announce tick. */
     fun flushQueued() = scope.launch {
         if (!::messageStore.isInitialized) return@launch

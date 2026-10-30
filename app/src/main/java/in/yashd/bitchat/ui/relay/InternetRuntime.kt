@@ -382,6 +382,24 @@ class InternetRuntime(private val backend: InternetBackend,
             catch (_: Exception) { synchronized(lock) { if (current()) error("Could not start inbox subscriptions. Check the relays and network.") } }
         }
     }
+    /** Pull-to-refresh: reconnect when the session is down, otherwise re-subscribe the inbox. */
+    fun refresh() = synchronized(lock) {
+        if (closed || state.value.configurationLoading || state.value.configurationError != null ||
+            state.value.storageLoading || state.value.storageError != null ||
+            state.value.discovery.isEmpty() || state.value.inboxes.isEmpty()) return@synchronized
+        val transport = session
+        if (transport == null) {
+            if (state.value.active) connect() else start()
+            return@synchronized
+        }
+        val current = generation
+        scope.launch {
+            try { await(transport.receive(state.value.inboxes)) }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { synchronized(lock) { if (current == generation) error("Could not refresh inbox subscriptions. Check the relays and network.") } }
+        }
+    }
+
     fun announce() = perform { transport, epoch ->
         mutable.update { if (epoch != generation) it else it.copy(setup = it.setup.copy(announcement = InboxAnnouncement.PUBLISHING, publications = emptyList(), error = null)) }
         try {
