@@ -397,10 +397,10 @@ private fun RelayBottomBar(selected: Int, onSelect: (Int) -> Unit) {
                     selected = selected == index,
                     onClick = { onSelect(index) },
                     icon = { RIcon(icons[index], null, size = 24.dp) },
-                    label = { Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium) },
+                    label = { Text(label, fontSize = 12.sp, fontWeight = FontWeight.Normal) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = RelayColors.Blue,
-                        selectedTextColor = RelayColors.Blue,
+                        selectedIconColor = RelayColors.Bluetooth,
+                        selectedTextColor = RelayColors.Bluetooth,
                         indicatorColor = RelayColors.BlueSelected,
                         unselectedIconColor = RelayColors.TextSecondary,
                         unselectedTextColor = RelayColors.TextSecondary

@@ -279,7 +279,7 @@ internal fun RelayChatScreen(
                     state = listState,
                     modifier = Modifier.fillMaxSize().testTag("relay-message-list"),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     items(rows, key = { row ->
                         when (row) {
@@ -479,24 +479,27 @@ private fun MessageBubbleView(
                     }
                 )
                 .combinedClickable(onClick = { if (b.failed) onRetry() }, onLongClick = { menu = true })
-                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .padding(horizontal = 12.dp, vertical = 7.dp)
         ) {
-            Text(b.body, color = RelayColors.TextPrimary, fontSize = 15.sp)
+            Column {
+                Text(b.body, color = RelayColors.TextPrimary, fontSize = 15.sp)
+                Row(
+                    modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    val metaColor = if (b.mine) Color.White.copy(alpha = 0.8f) else RelayColors.TextMuted
+                    if (pinned) RIcon(R.drawable.relay_pin, "Pinned message", tint = metaColor, size = 11.dp)
+                    if (b.atMs > 0) Text(clockTime(b.atMs), color = metaColor, fontSize = 11.sp)
+                    if (b.ticks == 2) RIcon(R.drawable.relay_check_double, "Delivered", tint = metaColor, size = 13.dp)
+                    if (b.ticks == 1) RIcon(R.drawable.relay_check, "Sent", tint = metaColor, size = 13.dp)
+                }
+            }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text("Copy") }, onClick = { menu = false; onCopy() })
                 DropdownMenuItem(text = { Text(if (pinned) "Unpin message" else "Pin message") }, onClick = { menu = false; onTogglePin() })
                 DropdownMenuItem(text = { Text("Delete", color = RelayColors.Red) }, onClick = { menu = false; confirmDelete = true })
             }
-        }
-        Row(
-            modifier = Modifier.padding(top = 4.dp, start = 4.dp, end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            if (pinned) RIcon(R.drawable.relay_pin, "Pinned message", tint = RelayColors.TextMuted, size = 12.dp)
-            if (b.atMs > 0) Text(clockTime(b.atMs), color = RelayColors.TextMuted, fontSize = 11.sp)
-            if (b.ticks == 2) RIcon(R.drawable.relay_check_double, "Delivered", tint = RelayColors.Bluetooth, size = 15.dp)
-            if (b.ticks == 1) RIcon(R.drawable.relay_check, "Sent", tint = RelayColors.TextSecondary, size = 15.dp)
         }
         if (showStatus && b.status != null) {
             val icon = when {

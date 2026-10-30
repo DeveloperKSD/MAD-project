@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
@@ -347,7 +348,7 @@ private fun FilterChipsRow(
                     .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
                 Text(label, color = if (isOn) RelayColors.Blue else RelayColors.TextPrimary,
-                    fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    fontSize = 14.sp, fontWeight = FontWeight.Normal)
             }
         }
         chatFilters.forEach { name -> chip(name, name, null) }
@@ -359,7 +360,7 @@ private fun FilterChipsRow(
                 .clickable { onCreate(true) }
                 .padding(horizontal = 14.dp, vertical = 6.dp)
         ) {
-            Text("+ New list", color = RelayColors.Blue, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text("+ New list", color = RelayColors.Blue, fontSize = 14.sp, fontWeight = FontWeight.Normal)
         }
     }
 }
@@ -385,7 +386,7 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite
                     modifier = Modifier.weight(1f),
                     color = RelayColors.TextPrimary,
                     fontSize = 16.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -403,13 +404,6 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite
                 }
                 if (item.unread > 0) UnreadBadge(item.unread)
             }
-            Text(
-                text = item.preview,
-                color = RelayColors.TextSecondary,
-                fontSize = 14.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
         }
         IconToggleButton(
             checked = favorite,
@@ -426,18 +420,20 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite
     }
 }
 
-/** The small icon + text line under the name ("BLE • Direct connection", "Waiting for relay sync"…). */
+/** The single line under the name: status icon + status text, then the message preview. */
 @Composable
-private fun ConnectionLine(item: ChatListItem) {
+private fun RowScope.ConnectionLine(item: ChatListItem) {
     val info = item.info
     when {
         item.failed -> {
             RIcon(R.drawable.relay_info, null, tint = RelayColors.Red, size = 15.dp)
-            Text("Message not sent", color = RelayColors.Red, fontSize = 12.sp, maxLines = 1)
+            Text("Message not sent", color = RelayColors.Red, fontSize = 12.sp, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
         item.waiting -> {
             RIcon(R.drawable.relay_clock, null, tint = RelayColors.Orange, size = 15.dp)
-            Text(if (info.nearby) "Waiting to send" else "Waiting for relay sync", color = RelayColors.Orange, fontSize = 12.sp, maxLines = 1)
+            Text(if (info.nearby) "Waiting to send" else "Waiting for relay sync", color = RelayColors.Orange, fontSize = 12.sp, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
         else -> {
             val icon = when {
@@ -452,7 +448,17 @@ private fun ConnectionLine(item: ChatListItem) {
                 else -> RelayColors.Nostr
             }
             RIcon(icon, null, tint = tint, size = 15.dp)
-            Text(info.linkText, color = RelayColors.TextMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(info.linkText, color = RelayColors.TextMuted, fontSize = 12.sp, maxLines = 1)
+            if (item.preview.isNotBlank()) {
+                Text(
+                    "·  " + item.preview,
+                    color = RelayColors.TextSecondary,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
         }
     }
 }
