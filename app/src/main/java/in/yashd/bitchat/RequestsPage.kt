@@ -41,7 +41,7 @@ fun RequestsPage(
         ) {
             TextButton(onClick = back) { Text("Back", color = RelayColors.Blue) }
             Spacer(Modifier.weight(1f))
-            Text("Requests", color = RelayColors.TextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            Text("Requests", color = RelayColors.TextPrimary, fontSize = RelayType.SubTitle, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
             Spacer(Modifier.width(64.dp))
         }
@@ -59,8 +59,8 @@ fun RequestsPage(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(name, color = RelayColors.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                        Text("Wants to message you", color = RelayColors.TextSecondary, fontSize = 13.sp)
+                        Text(name, color = RelayColors.TextPrimary, fontSize = RelayType.RowTitle)
+                        Text("Wants to message you", color = RelayColors.TextSecondary, fontSize = RelayType.Secondary)
                     }
                     TextButton(onClick = { accept(peerId) }) { Text("Accept", color = RelayColors.Blue) }
                     TextButton(onClick = { decline(peerId) }) { Text("Decline", color = RelayColors.Red) }

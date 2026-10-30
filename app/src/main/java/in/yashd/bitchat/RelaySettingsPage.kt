@@ -98,7 +98,7 @@ internal fun RelaySettingsPage(
                         Text(
                             myName.ifBlank { "You" },
                             color = RelayColors.TextPrimary,
-                            fontSize = 17.sp,
+                            fontSize = RelayType.SubTitle,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -203,7 +203,7 @@ internal fun NearbyDetailsPage(back: () -> Unit, content: LazyListScope.() -> Un
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = back) { RIcon(R.drawable.relay_back, "Back", tint = RelayColors.TextPrimary) }
-            Text("Bluetooth & identity", color = RelayColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text("Bluetooth & identity", color = RelayColors.TextPrimary, fontSize = RelayType.Body, fontWeight = FontWeight.SemiBold)
         }
         LazyColumn(
             modifier = Modifier.fillMaxSize(),

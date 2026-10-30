@@ -383,7 +383,7 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean,
                     text = info.title,
                     modifier = Modifier.weight(1f),
                     color = RelayColors.TextPrimary,
-                    fontSize = 16.sp,
+                    fontSize = RelayType.RowTitle,
                     fontWeight = FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -394,7 +394,7 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean,
                 }
                 // Unread chats get the accent-coloured time, like the reference client.
                 Text(item.lastAtMs?.let { listTime(it, now) } ?: "",
-                    color = if (item.unread > 0) RelayColors.Blue else RelayColors.TextSecondary, fontSize = 12.sp)
+                    color = if (item.unread > 0) RelayColors.Blue else RelayColors.TextSecondary, fontSize = RelayType.Meta)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -439,7 +439,7 @@ private fun RowScope.ConnectionLine(item: ChatListItem) {
                 Text(
                     "·  " + item.preview,
                     color = RelayColors.TextSecondary,
-                    fontSize = 13.sp,
+                    fontSize = RelayType.Secondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)

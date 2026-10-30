@@ -127,7 +127,7 @@ internal fun RelayContactScreen(
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
             ConversationAvatar(info, 84)
             Spacer(Modifier.height(14.dp))
-            Text(info.title, color = RelayColors.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+            Text(info.title, color = RelayColors.TextPrimary, fontSize = RelayType.ScreenTitle, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
             Spacer(Modifier.height(4.dp))
             Text(statusText, color = if (info.online) RelayColors.Green else RelayColors.TextSecondary, fontSize = 14.sp)
         }

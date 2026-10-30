@@ -458,8 +458,8 @@ private fun NewChatSheet(dismiss: () -> Unit, nearby: () -> Unit, online: () -> 
             modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("New Chat", color = RelayColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-            Text("How would you like to connect?", color = RelayColors.TextSecondary, fontSize = 14.sp)
+            Text("New Chat", color = RelayColors.TextPrimary, fontSize = RelayType.SubTitle, fontWeight = FontWeight.SemiBold)
+            Text("How would you like to connect?", color = RelayColors.TextSecondary, fontSize = RelayType.Label)
             Column(
                 Modifier
                     .fillMaxWidth()
