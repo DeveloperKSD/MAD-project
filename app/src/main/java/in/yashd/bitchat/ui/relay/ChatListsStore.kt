@@ -16,6 +16,7 @@ class ChatListsStore(
     private val cipher: HistoryCipher = HistoryCipher("relay.chat.lists.aes.v1")
 ) {
     private val prefs = context.applicationContext.getSharedPreferences("chat_lists", Context.MODE_PRIVATE)
+    private var state = ChatListsState()
     private val _lists = MutableStateFlow<List<Pair<String, String>>>(emptyList())
     val lists = _lists.asStateFlow()
     private val _membership = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
@@ -23,21 +24,27 @@ class ChatListsStore(
     var storageError = false
         private set
 
-    init { synchronized(LOCK) { load() } }
+    init { synchronized(LOCK) { load(); publish() } }
+
+    private fun publish() {
+        _lists.value = state.lists
+        _membership.value = state.membership
+    }
 
     private fun load() {
         try {
             val encrypted = prefs.getString(KEY, null) ?: return
             val obj = JSONObject(cipher.decrypt(encrypted.decode64(), BINDING))
-            _lists.value = obj.optJSONArray("lists")?.let { a ->
+            val lists = obj.optJSONArray("lists")?.let { a ->
                 (0 until a.length()).map { a.getJSONObject(it).let { o -> o.getString("id") to o.getString("name") } }
             }.orEmpty()
             val m = obj.optJSONObject("membership")
-            _membership.value = m?.let { mm ->
+            val membership = m?.let { mm ->
                 mm.keys().asSequence().associateWith { k ->
                     mm.getJSONArray(k).let { a -> (0 until a.length()).map { a.getString(it) }.toSet() }
                 }
             }.orEmpty()
+            state = ChatListsState(lists, membership)
         } catch (_: Exception) {
             storageError = true
         }
@@ -47,9 +54,9 @@ class ChatListsStore(
         if (storageError) return false
         return try {
             val lists = JSONArray()
-            _lists.value.forEach { (id, name) -> lists.put(JSONObject().put("id", id).put("name", name)) }
+            state.lists.forEach { (id, name) -> lists.put(JSONObject().put("id", id).put("name", name)) }
             val membership = JSONObject()
-            _membership.value.forEach { (route, ids) ->
+            state.membership.forEach { (route, ids) ->
                 membership.put(route, JSONArray().also { a -> ids.sorted().forEach(a::put) })
             }
             val obj = JSONObject().put("lists", lists).put("membership", membership)
@@ -65,41 +72,30 @@ class ChatListsStore(
         }
     }
 
-    fun create(name: String): Boolean = synchronized(LOCK) {
-        val trimmed = name.trim().take(30)
-        if (storageError || trimmed.isEmpty()) return@synchronized false
-        load()
-        if (storageError) return@synchronized false
-        _lists.value = _lists.value + (UUID.randomUUID().toString() to trimmed)
-        write()
-    }
-
-    fun deleteList(listId: String): Boolean = synchronized(LOCK) {
+    /** Reload under the shared lock first so an older UI instance cannot overwrite newer state. */
+    private fun mutate(transform: (ChatListsState) -> ChatListsState?): Boolean = synchronized(LOCK) {
         if (storageError) return@synchronized false
         load()
         if (storageError) return@synchronized false
-        _lists.value = _lists.value.filter { it.first != listId }
-        _membership.value = _membership.value.mapValues { (_, ids) -> ids - listId }.filterValues { it.isNotEmpty() }
-        write()
+        val next = transform(state) ?: return@synchronized false
+        state = next
+        val ok = write()
+        publish()
+        ok
     }
 
-    fun toggle(route: String, listId: String): Boolean = synchronized(LOCK) {
-        if (storageError) return@synchronized false
-        load()
-        if (storageError) return@synchronized false
-        val current = _membership.value[route].orEmpty()
-        val next = if (listId in current) current - listId else current + listId
-        _membership.value = if (next.isEmpty()) _membership.value - route else _membership.value + (route to next)
-        write()
-    }
-
+    fun create(name: String): Boolean = mutate { ChatListsCore.create(it, UUID.randomUUID().toString(), name) }
+    fun deleteList(listId: String): Boolean = mutate { ChatListsCore.deleteList(it, listId) }
+    fun toggle(route: String, listId: String): Boolean = mutate { ChatListsCore.toggle(it, route, listId) }
     fun removeRoute(route: String): Boolean = synchronized(LOCK) {
         if (storageError) return@synchronized false
         load()
-        if (storageError) false else if (route !in _membership.value) true else {
-            _membership.value = _membership.value - route
-            write()
-        }
+        if (storageError) return@synchronized false
+        if (route !in state.membership) return@synchronized true
+        state = ChatListsCore.removeRoute(state, route)
+        val ok = write()
+        publish()
+        ok
     }
 
     companion object {

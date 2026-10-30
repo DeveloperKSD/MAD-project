@@ -124,7 +124,7 @@ fun RelayStartFlow(content: @Composable () -> Unit) {
         // upgraded app (whose legacy identity may have been rewritten on this very launch).
         val fileExists = runCatching { identityFile.exists() && identityFile.length() > 0 }.getOrDefault(false)
         val predatesProcess = runCatching { identityFile.lastModified() < processStartWall }.getOrDefault(false)
-        val existing = fileExists && (predatesProcess || upgrade)
+        val existing = OnboardingDecision.isExistingInstall(fileExists, predatesProcess, upgrade)
         if (!done && existing) prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
         !done && !existing
     }
