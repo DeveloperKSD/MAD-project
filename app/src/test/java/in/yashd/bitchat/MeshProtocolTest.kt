@@ -26,6 +26,17 @@ class MeshProtocolTest {
         }
     }
 
+    @Test fun controlPacketRoundTripKeepsRecipientAndSignature() {
+        val signer = keys()
+        val packet = PacketCodec.createSigned(PacketType.CONTROL, "01".repeat(8), "02".repeat(8),
+            "{\"kind\":\"request_accept\"}".toByteArray(), signer.private.encoded)
+        val decoded = PacketCodec.decode(PacketCodec.encode(packet))
+        assertEquals(PacketType.CONTROL, decoded.type)
+        assertEquals("02".repeat(8), decoded.recipientId)
+        assertTrue(PacketCodec.verify(decoded, signer.public.encoded))
+        assertFalse(PacketCodec.verify(decoded.copy(payload = "{\"kind\":\"forged\"}".toByteArray()), signer.public.encoded))
+    }
+
     @Test fun peerIdBindsBothKeysAndSubstitutedSigningKeyFails() {
         val encryption = keys()
         val signing = keys()
