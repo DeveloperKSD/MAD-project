@@ -247,7 +247,12 @@ internal fun RelayChatsScreen(
     onRefresh: () -> Unit = {},
     toggleFavorite: (String) -> Unit = {},
     requestsCount: Int = 0,
-    openRequests: () -> Unit = {}
+    openRequests: () -> Unit = {},
+    lists: List<Pair<String, String>> = emptyList(),
+    listMembership: Map<String, Set<String>> = emptyMap(),
+    createList: (String) -> Unit = {},
+    toggleListMembership: (String, String) -> Unit = { _, _ -> },
+    deleteList: (String) -> Unit = {}
 ) {
     // Search text can contain private names, so it is kept in memory only.
     var search by remember { mutableStateOf("") }
@@ -256,17 +261,76 @@ internal fun RelayChatsScreen(
     val visible = items.filter { item ->
         val matches = query.isEmpty() || item.info.title.contains(query, true) ||
             item.preview.contains(query, true) || item.info.publicId.contains(query, true)
-        matches && when (filter) {
-            "Nearby" -> item.info.nearby
-            "Internet" -> !item.info.nearby
-            "Offline" -> !item.info.online
-            "Favorites" -> item.info.route in favorites
+        matches && when {
+            filter == "Nearby" -> item.info.nearby
+            filter == "Internet" -> !item.info.nearby
+            filter == "Offline" -> !item.info.online
+            filter == "Favorites" -> item.info.route in favorites
+            filter.startsWith("list:") -> filter.removePrefix("list:") in listMembership[item.info.route].orEmpty()
             else -> true
         }
     }.sortedByDescending { it.info.route in pinned } // stable: pinned chats first, newest first inside each group
-    // Which row's menu is open, and which chat is waiting for delete confirmation.
+    // Which row's menu is open, which chat is waiting for delete confirmation,
+    // whether the new-list dialog shows, and which chat's list picker is open.
     var menuRoute by remember { mutableStateOf<String?>(null) }
     var confirmRoute by remember { mutableStateOf<String?>(null) }
+    var creatingList by remember { mutableStateOf(false) }
+    var listRoute by remember { mutableStateOf<String?>(null) }
+    if (creatingList) {
+        var name by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { creatingList = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    createList(name); creatingList = false
+                }, enabled = name.isNotBlank()) { Text("Create", color = RelayColors.Blue) }
+            },
+            dismissButton = { TextButton(onClick = { creatingList = false }) { Text("Cancel", color = RelayColors.TextSecondary) } },
+            title = { Text("New list", color = RelayColors.TextPrimary) },
+            text = {
+                BasicTextField(
+                    value = name,
+                    onValueChange = { name = it.take(30) },
+                    singleLine = true,
+                    textStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 15.sp),
+                    cursorBrush = SolidColor(RelayColors.Blue),
+                    decorationBox = { inner ->
+                        if (name.isEmpty()) Text("List name", color = RelayColors.TextMuted, fontSize = 15.sp)
+                        inner()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(RelayColors.CardHigh)
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                )
+            },
+            containerColor = RelayColors.Card
+        )
+    }
+    listRoute?.let { route ->
+        AlertDialog(
+            onDismissRequest = { listRoute = null },
+            confirmButton = { TextButton(onClick = { listRoute = null }) { Text("Done", color = RelayColors.Blue) } },
+            title = { Text("Lists", color = RelayColors.TextPrimary) },
+            text = {
+                Column {
+                    if (lists.isEmpty()) Text("No lists yet. Tap + above the chats to make one.", color = RelayColors.TextSecondary, fontSize = 14.sp)
+                    lists.forEach { (id, listName) ->
+                        val inList = id in listMembership[route].orEmpty()
+                        Row(
+                            Modifier.fillMaxWidth().clickable { toggleListMembership(route, id) }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(listName, Modifier.weight(1f), color = RelayColors.TextPrimary, fontSize = 15.sp)
+                            Text(if (inList) "✓" else "", color = RelayColors.Blue, fontSize = 16.sp)
+                        }
+                    }
+                }
+            },
+            containerColor = RelayColors.Card
+        )
+    }
     confirmRoute?.let { route ->
         val name = items.firstOrNull { it.info.route == route }?.info?.title ?: "this chat"
         ConfirmDeleteDialog(
@@ -297,7 +361,7 @@ internal fun RelayChatsScreen(
         LazyColumn(Modifier.fillMaxSize().testTag("relay-chat-list"), contentPadding = PaddingValues(bottom = 88.dp)) {
             item { RelayHeader("Relay", myName, onAvatar) }
             item { RelaySearchField(search, { search = it }, "Find your friends") }
-            item { FilterChipsRow(filter, { filter = it }) }
+            item { FilterChipsRow(filter, { filter = it }, lists, { creatingList = true }, deleteList) }
             if (requestsCount > 0) {
                 item {
                     Row(
@@ -350,6 +414,10 @@ internal fun RelayChatsScreen(
                             onClick = { menuRoute = null; togglePin(route) }
                         )
                         DropdownMenuItem(
+                            text = { Text("Lists") },
+                            onClick = { menuRoute = null; listRoute = route }
+                        )
+                        DropdownMenuItem(
                             text = { Text("Delete chat", color = RelayColors.Red) },
                             onClick = { menuRoute = null; confirmRoute = route }
                         )
@@ -399,7 +467,23 @@ internal fun RelaySearchField(value: String, onChange: (String) -> Unit, placeho
 }
 
 @Composable
-private fun FilterChipsRow(selected: String, onSelect: (String) -> Unit) {
+private fun FilterChipsRow(
+    selected: String,
+    onSelect: (String) -> Unit,
+    lists: List<Pair<String, String>> = emptyList(),
+    onCreate: (Boolean) -> Unit = {},
+    deleteList: (String) -> Unit = {}
+) {
+    var confirmList by remember { mutableStateOf<Pair<String, String>?>(null) }
+    confirmList?.let { (id, listName) ->
+        ConfirmDeleteDialog(
+            title = "Delete list?",
+            text = "$listName will be removed. The chats in it stay.",
+            confirmLabel = "Delete list",
+            onConfirm = { confirmList = null; deleteList(id) },
+            onDismiss = { confirmList = null }
+        )
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -408,18 +492,29 @@ private fun FilterChipsRow(selected: String, onSelect: (String) -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        chatFilters.forEach { name ->
-            val isOn = name == selected
+        val chip: @Composable (String, String, (() -> Unit)?) -> Unit = { label, key, onLong ->
+            val isOn = key == selected
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(16.dp))
                     .background(if (isOn) RelayColors.BlueSelected else Color.Transparent)
                     .border(1.dp, if (isOn) RelayColors.Blue.copy(alpha = 0.5f) else RelayColors.Divider, RoundedCornerShape(16.dp))
-                    .clickable { onSelect(name) }
+                    .combinedClickable(onClick = { onSelect(key) }, onLongClick = onLong)
                     .padding(horizontal = 14.dp, vertical = 7.dp)
             ) {
-                Text(name, color = if (isOn) Color.White else RelayColors.TextPrimary, fontSize = 13.sp)
+                Text(label, color = if (isOn) Color.White else RelayColors.TextPrimary, fontSize = 13.sp)
             }
+        }
+        chatFilters.forEach { name -> chip(name, name, null) }
+        lists.forEach { (id, listName) -> chip(listName, "list:" + id) { confirmList = id to listName } }
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .border(1.dp, RelayColors.Divider, RoundedCornerShape(16.dp))
+                .clickable { onCreate(true) }
+                .padding(horizontal = 14.dp, vertical = 7.dp)
+        ) {
+            Text("+ New list", color = RelayColors.Blue, fontSize = 13.sp)
         }
     }
 }

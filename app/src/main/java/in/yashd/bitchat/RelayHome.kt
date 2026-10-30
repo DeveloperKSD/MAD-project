@@ -103,6 +103,10 @@ fun RelayHome(
     val savedMutes by muteStore.mutes.collectAsState()
     val seenStore = remember { `in`.yashd.bitchat.ui.relay.LastReadStore(muteContext) }
     val savedSeen by seenStore.seen.collectAsState()
+    // Custom chat lists (Work, Family, ...) persist encrypted.
+    val listsStore = remember { `in`.yashd.bitchat.ui.relay.ChatListsStore(muteContext) }
+    val savedLists by listsStore.lists.collectAsState()
+    val savedListMembership by listsStore.membership.collectAsState()
     // Favourites and pins are stored independently and encrypted across restarts.
     val context = LocalContext.current
     val favoriteStore = remember { FavoriteChatsStore(context) }
@@ -175,6 +179,7 @@ fun RelayHome(
             // Persist cleanup even if the UI scope was cancelled by recreation during deletion.
             val removed = key == null || favoriteStore.remove(key)
             scope.launch {
+                listsStore.removeRoute(route)
                 pinStore.remove(route)
                 messagePinStore.removeChat(route)
                 // Keep mute preferences when deleting history.
@@ -321,6 +326,11 @@ fun RelayHome(
                         deleteChat = deleteChat,
                         requestsCount = pendingRequests.size,
                         openRequests = { requestsOpen = true },
+                        lists = savedLists,
+                        listMembership = savedListMembership,
+                        createList = { if (!listsStore.create(it)) toast("List could not be saved. Existing data was preserved.") },
+                        toggleListMembership = { route, id -> if (!listsStore.toggle(route, id)) toast("Lists could not be saved. Existing data was preserved.") },
+                        deleteList = { if (!listsStore.deleteList(it)) toast("List could not be deleted. Existing data was preserved.") },
                         refreshing = refreshing,
                         onRefresh = {
                             scope.launch {
