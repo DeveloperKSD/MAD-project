@@ -90,6 +90,8 @@ object MeshRuntime {
         if (messageStore.storageError) addError("Nearby history is unavailable; existing data was preserved.")
         requestsStore = NearbyRequestsStore(appContext)
         requestsStore.seedAccepted(messageStore.knownPeerIds())
+        // Accepted requests whose signed accept never reached the mesh keep retrying after restarts.
+        requestsStore.acceptOutbox.value.forEach { pendingControls["$it:request_accept"] = it }
         scope.launch { requestsStore.pending.collect { _pendingRequests.value = it } }
         scope.launch {
             peerManager.peers.collect { publishState() }
@@ -191,7 +193,7 @@ object MeshRuntime {
     /** Accept an incoming chat request: the chat joins the list and they get a signed accept. */
     fun acceptRequest(peerId: String) = scope.launch {
         if (!::requestsStore.isInitialized) return@launch
-        requestsStore.accept(peerId)
+        requestsStore.accept(peerId, notifyPeer = true)
         pendingControls["$peerId:request_accept"] = peerId
         sendControl(peerId, "request_accept")
     }
@@ -210,7 +212,10 @@ object MeshRuntime {
             PacketCodec.createSigned(PacketType.CONTROL, identity.peerId, peerId, payload, identity.signingPrivateKey)
         }.getOrNull() ?: return false
         val accepted = runCatching { transport?.send(PacketCodec.encode(packet)) == true }.getOrDefault(false)
-        if (accepted) pendingControls.remove("$peerId:$kind")
+        if (accepted) {
+            pendingControls.remove("$peerId:$kind")
+            if (kind == "request_accept" && ::requestsStore.isInitialized) requestsStore.acceptDispatched(peerId)
+        }
         return accepted
     }
 
