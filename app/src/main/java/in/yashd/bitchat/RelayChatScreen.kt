@@ -568,28 +568,42 @@ private fun BubbleBody(b: BubbleUi, pinned: Boolean) {
             if (b.ticks == 1) RIcon(R.drawable.relay_check, "Sent", tint = metaColor, size = 13.dp)
         }
     }) { measurables, constraints ->
-        val meta = measurables[1].measure(Constraints())
+        val meta = measurables[1].measure(Constraints(maxWidth = constraints.maxWidth))
         val gapPx = 6.dp.roundToPx()
         val belowGapPx = 2.dp.roundToPx()
-        val result = measurer.measure(AnnotatedString(b.body), style = bodyStyle, constraints = constraints)
-        val lastLine = result.lineCount - 1
-        val lineRight = result.getLineRight(lastLine)
-        val lineTop = result.getLineTop(lastLine)
-        val lineBottom = result.getLineBottom(lastLine)
-        val inlineFits = lineRight + gapPx + meta.width <= constraints.maxWidth
-        val width = maxOf(
-            result.size.width,
-            if (inlineFits) (lineRight + gapPx + meta.width).toInt() else meta.width
-        )
-        val height = if (inlineFits) result.size.height else result.size.height + belowGapPx + meta.height
-        val text = measurables[0].measure(Constraints.fixedWidth(result.size.width))
-        layout(width, height) {
-            text.place(0, 0)
-            if (inlineFits) {
-                val y = (lineTop + (lineBottom - lineTop - meta.height) / 2f).toInt().coerceIn(0, height - meta.height)
-                meta.place(width - meta.width, y)
-            } else {
-                meta.place(width - meta.width, result.size.height + belowGapPx)
+        val result = if (b.body.isBlank()) null
+            else measurer.measure(AnnotatedString(b.body), style = bodyStyle, constraints = constraints)
+        if (result == null || result.lineCount == 0) {
+            // Nothing to align against: stack the meta under the text, right-aligned.
+            val text = measurables[0].measure(Constraints(maxWidth = constraints.maxWidth))
+            val width = maxOf(text.width, meta.width).coerceIn(constraints.minWidth, constraints.maxWidth)
+            val height = text.height + belowGapPx + meta.height
+            layout(width, height) {
+                text.place(0, 0)
+                meta.place((width - meta.width).coerceAtLeast(0), text.height + belowGapPx)
+            }
+        } else {
+            val lastLine = result.lineCount - 1
+            val lineRight = result.getLineRight(lastLine)
+            val lineTop = result.getLineTop(lastLine)
+            val lineBottom = result.getLineBottom(lastLine)
+            val inlineFits = lineRight + gapPx + meta.width <= constraints.maxWidth
+            val width = maxOf(
+                result.size.width,
+                if (inlineFits) (lineRight + gapPx + meta.width).toInt() else meta.width
+            ).coerceIn(constraints.minWidth, constraints.maxWidth)
+            val rawHeight = if (inlineFits) result.size.height else result.size.height + belowGapPx + meta.height
+            val height = if (constraints.hasBoundedHeight) rawHeight.coerceAtMost(constraints.maxHeight) else rawHeight
+            val text = measurables[0].measure(Constraints.fixedWidth(result.size.width.coerceAtMost(constraints.maxWidth)))
+            layout(width, height) {
+                text.place(0, 0)
+                val maxY = (height - meta.height).coerceAtLeast(0)
+                if (inlineFits) {
+                    val y = (lineTop + (lineBottom - lineTop - meta.height) / 2f).toInt().coerceIn(0, maxY)
+                    meta.place((width - meta.width).coerceAtLeast(0), y)
+                } else {
+                    meta.place((width - meta.width).coerceAtLeast(0), (result.size.height + belowGapPx).coerceIn(0, maxY))
+                }
             }
         }
     }
