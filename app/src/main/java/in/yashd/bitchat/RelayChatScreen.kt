@@ -108,8 +108,8 @@ private fun nearbyBubbles(mesh: MeshUiState, peerId: String?, hidden: List<Strin
                 MessageStatus.SentToTransport -> if (peerId == null) "Sent • Nearby group" else "Sent • BLE"
                 MessageStatus.Delivered -> when (m.deliveredHops) {
                     null, 0 -> "Delivered • BLE"
-                    1 -> "Delivered • via 1 hop"
-                    else -> "Delivered • via ${m.deliveredHops} hops"
+                    1 -> "Delivered • via ~1 hop"
+                    else -> "Delivered • via ~${m.deliveredHops} hops"
                 }
                 MessageStatus.Read -> "Read • BLE"
                 MessageStatus.Failed -> "Not sent • Tap to retry"

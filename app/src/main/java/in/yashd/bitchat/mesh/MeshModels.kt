@@ -45,7 +45,8 @@ data class ChatMessage(
     val isPrivate: Boolean,
     val status: MessageStatus,
     val direction: MessageDirection,
-    /** Hops the delivery ACK travelled (0 = direct), null until delivered. */
+    /** Hops the delivery ACK travelled (0 = direct), null until delivered.
+     * Derived from the ACK's TTL, which a relay can alter: approximate, not authenticated. */
     val deliveredHops: Int? = null,
     /** Sender's own message id on inbound messages, used to deduplicate re-sent packets. */
     val senderMessageId: String? = null
