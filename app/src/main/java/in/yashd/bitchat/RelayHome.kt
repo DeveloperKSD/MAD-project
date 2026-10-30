@@ -107,6 +107,13 @@ fun RelayHome(
     val listsStore = remember { `in`.yashd.bitchat.ui.relay.ChatListsStore(muteContext) }
     val savedLists by listsStore.lists.collectAsState()
     val savedListMembership by listsStore.membership.collectAsState()
+    // System connectivity (ConnectivityManager): validated internet, not just Wi-Fi association.
+    val connectivity = remember { `in`.yashd.bitchat.connectivity.ConnectivityObserver(muteContext) }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        connectivity.start()
+        onDispose { connectivity.stop() }
+    }
+    val online by connectivity.online.collectAsState()
     // Favourites and pins are stored independently and encrypted across restarts.
     val context = LocalContext.current
     val favoriteStore = remember { FavoriteChatsStore(context) }
@@ -247,6 +254,7 @@ fun RelayHome(
                     }
             ) {
                 internet.error?.takeIf { !setupOpen }?.let { ErrorBanner(it, model::clearError) }
+                if (tab == 0 && atRoot && !online) OfflineNotice(mesh.serviceRunning)
                 when {
                     requestsOpen -> RequestsPage(
                         mesh = mesh,
@@ -400,6 +408,29 @@ private fun RelayBottomBar(selected: Int, onSelect: (Int) -> Unit) {
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun OfflineNotice(nearbyOn: Boolean) {
+    // Offline only means Internet chats are unavailable; Nearby is only claimed when its
+    // Bluetooth service is actually running.
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(RelayColors.Card)
+            .padding(start = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            if (nearbyOn) "No internet connection. Internet chats are unavailable; Nearby over Bluetooth is on."
+            else "No internet connection. Internet chats are unavailable.",
+            Modifier.weight(1f).padding(vertical = 10.dp),
+            color = RelayColors.TextPrimary,
+            fontSize = 13.sp
+        )
     }
 }
 
