@@ -31,7 +31,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -251,8 +250,7 @@ internal fun RelayChatsScreen(
                 val route = item.info.route
                 val isPinned = route in pinned
                 Box {
-                    ChatListRow(item, now, isPinned, route in favorites,
-                        toggleFavorite = { toggleFavorite(route) },
+                    ChatListRow(item, now, isPinned,
                         onClick = { openChat(route) }, onLongClick = { menuRoute = route })
                     DropdownMenu(expanded = menuRoute == route, onDismissRequest = { menuRoute = null }) {
                         DropdownMenuItem(
@@ -367,8 +365,8 @@ private fun FilterChipsRow(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite: Boolean,
-                        toggleFavorite: () -> Unit, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean,
+                        onClick: () -> Unit, onLongClick: () -> Unit) {
     val info = item.info
     Row(
         modifier = Modifier
@@ -404,18 +402,6 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite
                 }
                 if (item.unread > 0) UnreadBadge(item.unread)
             }
-        }
-        IconToggleButton(
-            checked = favorite,
-            onCheckedChange = { toggleFavorite() },
-            modifier = Modifier.size(48.dp)
-        ) {
-            RIcon(
-                if (favorite) R.drawable.relay_star_filled else R.drawable.relay_star,
-                if (favorite) "Remove ${info.title} from favorites" else "Add ${info.title} to favorites",
-                tint = if (favorite) RelayColors.Orange else RelayColors.TextSecondary,
-                size = 22.dp
-            )
         }
     }
 }

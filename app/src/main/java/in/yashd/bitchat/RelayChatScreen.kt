@@ -49,7 +49,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -71,7 +75,7 @@ import kotlinx.coroutines.launch
 // ---------------------------------------------------------------------------
 
 /** One message as the screen draws it, whatever transport it came from. */
-private data class BubbleUi(
+internal data class BubbleUi(
     val id: String,
     val body: String,
     val mine: Boolean,
@@ -81,12 +85,13 @@ private data class BubbleUi(
     val ticks: Int,
     val failed: Boolean,
     val pending: Boolean,
-    val nearbyMessage: ChatMessage?
+    val nearbyMessage: ChatMessage?,
+    val runStart: Boolean = false
 )
 
-private sealed interface ThreadRow {
+internal sealed interface ThreadRow {
     data class Day(val key: String, val label: String) : ThreadRow
-    data class Message(val bubble: BubbleUi) : ThreadRow
+    data class Message(val bubble: BubbleUi, val bigGapBefore: Boolean = false) : ThreadRow
 }
 
 private fun nearbyBubbles(mesh: MeshUiState, peerId: String?, hidden: List<String>): List<BubbleUi> {
@@ -143,15 +148,22 @@ private fun internetBubbles(internet: RelayUiState, npub: String): List<BubbleUi
         )
     }
 
-private fun withDays(bubbles: List<BubbleUi>, now: Long): List<ThreadRow> {
+internal fun withDays(bubbles: List<BubbleUi>, now: Long): List<ThreadRow> {
     val rows = ArrayList<ThreadRow>(bubbles.size + 4)
     var lastDay: Long? = null
+    var lastMine: Boolean? = null
     for (b in bubbles) {
+        var dayBreak = false
         if (b.atMs > 0 && (lastDay == null || !sameDay(lastDay, b.atMs))) {
             rows.add(ThreadRow.Day("day-${b.id}", dayTitle(b.atMs, now)))
             lastDay = b.atMs
+            dayBreak = true
         }
-        rows.add(ThreadRow.Message(b))
+        // A new same-sender run starts after a day break or a side switch; runs get a
+        // tail on their first bubble and a larger gap above them.
+        val runStart = dayBreak || lastMine == null || lastMine != b.mine
+        rows.add(ThreadRow.Message(b.copy(runStart = runStart), bigGapBefore = !dayBreak && lastMine != null && lastMine != b.mine))
+        lastMine = b.mine
     }
     return rows
 }
@@ -288,14 +300,23 @@ internal fun RelayChatScreen(
                         }
                     }) { row ->
                         when (row) {
-                            is ThreadRow.Day -> Text(
-                                text = row.label,
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                color = RelayColors.TextSecondary,
-                                fontSize = 12.sp,
-                                textAlign = TextAlign.Center
-                            )
-                            is ThreadRow.Message -> MessageBubbleView(
+                            is ThreadRow.Day -> Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(RelayColors.Card)
+                                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                                ) {
+                                    Text(text = row.label, color = RelayColors.TextSecondary, fontSize = 12.sp)
+                                }
+                            }
+                            is ThreadRow.Message -> Box(
+                                modifier = Modifier.padding(top = if (row.bigGapBefore) 8.dp else 0.dp)
+                            ) {
+                                MessageBubbleView(
                                 b = row.bubble,
                                 nearby = info.nearby,
                                 showStatus = row.bubble.failed || row.bubble.id == lastMineId,
@@ -315,7 +336,8 @@ internal fun RelayChatScreen(
                                         toast("Message deleted")
                                     }
                                 }
-                            )
+                                )
+                            }
                         }
                     }
                 }
@@ -358,7 +380,7 @@ private fun ChatTopBar(
         )
     }
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         IconButton(onClick = back) { RIcon(R.drawable.relay_back, "Back to Chats", tint = RelayColors.TextPrimary) }
@@ -370,9 +392,9 @@ private fun ChatTopBar(
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            ConversationAvatar(info, 38)
-            Spacer(Modifier.width(10.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            ConversationAvatar(info, 34)
+            Spacer(Modifier.width(8.dp))
+            Column {
                 Text(info.title, color = RelayColors.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(info.linkText, color = RelayColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -467,10 +489,18 @@ private fun MessageBubbleView(
                 fontWeight = FontWeight.SemiBold
             )
         }
+        // Rounded rectangle; bubbles that start a same-sender run also get a sharp
+        // upper corner on the sender's side, echoing the reference client's tail.
+        val bubbleShape = when {
+            b.mine && b.runStart -> RoundedCornerShape(topStart = 16.dp, topEnd = 4.dp, bottomEnd = 16.dp, bottomStart = 16.dp)
+            b.mine -> RoundedCornerShape(16.dp)
+            b.runStart -> RoundedCornerShape(topStart = 4.dp, topEnd = 16.dp, bottomEnd = 16.dp, bottomStart = 16.dp)
+            else -> RoundedCornerShape(16.dp)
+        }
         Box(
             modifier = Modifier
                 .widthIn(max = 280.dp)
-                .clip(RoundedCornerShape(18.dp))
+                .clip(bubbleShape)
                 .background(
                     when {
                         !b.mine -> RelayColors.CardHigh
@@ -481,20 +511,7 @@ private fun MessageBubbleView(
                 .combinedClickable(onClick = { if (b.failed) onRetry() }, onLongClick = { menu = true })
                 .padding(horizontal = 12.dp, vertical = 7.dp)
         ) {
-            Column {
-                Text(b.body, color = RelayColors.TextPrimary, fontSize = 15.sp)
-                Row(
-                    modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    val metaColor = if (b.mine) Color.White.copy(alpha = 0.8f) else RelayColors.TextMuted
-                    if (pinned) RIcon(R.drawable.relay_pin, "Pinned message", tint = metaColor, size = 11.dp)
-                    if (b.atMs > 0) Text(clockTime(b.atMs), color = metaColor, fontSize = 11.sp)
-                    if (b.ticks == 2) RIcon(R.drawable.relay_check_double, "Delivered", tint = metaColor, size = 13.dp)
-                    if (b.ticks == 1) RIcon(R.drawable.relay_check, "Sent", tint = metaColor, size = 13.dp)
-                }
-            }
+            BubbleBody(b, pinned)
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text("Copy") }, onClick = { menu = false; onCopy() })
                 DropdownMenuItem(text = { Text(if (pinned) "Unpin message" else "Pin message") }, onClick = { menu = false; onTogglePin() })
@@ -532,6 +549,52 @@ private fun MessageBubbleView(
     }
 }
 
+/**
+ * Message text with the time/ticks tucked beside the last text line when that line
+ * has room, otherwise on a line of its own at the bubble's lower right - the
+ * reference client's behavior. Measured synchronously so there is no second frame.
+ */
+@Composable
+private fun BubbleBody(b: BubbleUi, pinned: Boolean) {
+    val measurer = rememberTextMeasurer()
+    val bodyStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 15.sp)
+    Layout(content = {
+        Text(b.body, style = bodyStyle)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            val metaColor = if (b.mine) Color.White.copy(alpha = 0.8f) else RelayColors.TextMuted
+            if (pinned) RIcon(R.drawable.relay_pin, "Pinned message", tint = metaColor, size = 11.dp)
+            if (b.atMs > 0) Text(clockTime(b.atMs), color = metaColor, fontSize = 11.sp)
+            if (b.ticks == 2) RIcon(R.drawable.relay_check_double, "Delivered", tint = metaColor, size = 13.dp)
+            if (b.ticks == 1) RIcon(R.drawable.relay_check, "Sent", tint = metaColor, size = 13.dp)
+        }
+    }) { measurables, constraints ->
+        val meta = measurables[1].measure(Constraints())
+        val gapPx = 6.dp.roundToPx()
+        val belowGapPx = 2.dp.roundToPx()
+        val result = measurer.measure(AnnotatedString(b.body), style = bodyStyle, constraints = constraints)
+        val lastLine = result.lineCount - 1
+        val lineRight = result.getLineRight(lastLine)
+        val lineTop = result.getLineTop(lastLine)
+        val lineBottom = result.getLineBottom(lastLine)
+        val inlineFits = lineRight + gapPx + meta.width <= constraints.maxWidth
+        val width = maxOf(
+            result.size.width,
+            if (inlineFits) (lineRight + gapPx + meta.width).toInt() else meta.width
+        )
+        val height = if (inlineFits) result.size.height else result.size.height + belowGapPx + meta.height
+        val text = measurables[0].measure(Constraints.fixedWidth(result.size.width))
+        layout(width, height) {
+            text.place(0, 0)
+            if (inlineFits) {
+                val y = (lineTop + (lineBottom - lineTop - meta.height) / 2f).toInt().coerceIn(0, height - meta.height)
+                meta.place(width - meta.width, y)
+            } else {
+                meta.place(width - meta.width, result.size.height + belowGapPx)
+            }
+        }
+    }
+}
+
 @Composable
 private fun Composer(
     draft: String,
@@ -550,32 +613,31 @@ private fun Composer(
     ) {
         Box(
             modifier = Modifier
-                .size(42.dp)
-                .clip(CircleShape)
-                .background(RelayColors.CardHigh)
-                .clickable(onClick = onPlus),
-            contentAlignment = Alignment.Center
-        ) {
-            RIcon(R.drawable.relay_plus, "Add attachment", tint = RelayColors.TextPrimary, size = 22.dp)
-        }
-        Spacer(Modifier.width(10.dp))
-        Box(
-            modifier = Modifier
                 .weight(1f)
                 .clip(RoundedCornerShape(22.dp))
                 .background(RelayColors.Card)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            contentAlignment = Alignment.CenterStart
+                .padding(horizontal = 12.dp, vertical = 12.dp)
         ) {
-            if (draft.isEmpty()) Text("Message…", color = RelayColors.TextMuted, fontSize = 15.sp)
-            BasicTextField(
-                value = draft,
-                onValueChange = onDraft,
-                maxLines = 5,
-                textStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 15.sp),
-                cursorBrush = SolidColor(RelayColors.Blue),
-                modifier = Modifier.fillMaxWidth()
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier.size(28.dp).clickable(onClick = onPlus),
+                    contentAlignment = Alignment.Center
+                ) {
+                    RIcon(R.drawable.relay_plus, "Add attachment", tint = RelayColors.TextSecondary, size = 22.dp)
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                    if (draft.isEmpty()) Text("Message…", color = RelayColors.TextMuted, fontSize = 15.sp)
+                    BasicTextField(
+                        value = draft,
+                        onValueChange = onDraft,
+                        maxLines = 5,
+                        textStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 15.sp),
+                        cursorBrush = SolidColor(RelayColors.Blue),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
         }
         Spacer(Modifier.width(10.dp))
         Box(

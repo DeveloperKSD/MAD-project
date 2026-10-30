@@ -109,6 +109,14 @@ internal fun RelayContactScreen(
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = back) { RIcon(R.drawable.relay_back, "Back", tint = RelayColors.TextPrimary) }
             Spacer(Modifier.weight(1f))
+            IconButton(onClick = toggleFavorite) {
+                RIcon(
+                    if (favorite) R.drawable.relay_star_filled else R.drawable.relay_star,
+                    if (favorite) "Remove ${info.title} from favorites" else "Add ${info.title} to favorites",
+                    tint = if (favorite) RelayColors.Orange else RelayColors.TextPrimary,
+                    size = 22.dp
+                )
+            }
             Box {
                 IconButton(onClick = { menu = true }) { RIcon(R.drawable.relay_more, "More options", tint = RelayColors.TextPrimary, size = 20.dp) }
                 ContactMenu(menu, { menu = false }, favorite, toggleFavorite, copyId, toast)
