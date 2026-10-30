@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.sp
 import `in`.yashd.bitchat.mesh.MeshRuntime
 import `in`.yashd.bitchat.mesh.MeshUiState
 import `in`.yashd.bitchat.ui.relay.InternetSetupScreen
+import `in`.yashd.bitchat.ui.relay.inboxStatusSummary
 import `in`.yashd.bitchat.ui.relay.OnlineChatScreen
 import `in`.yashd.bitchat.ui.relay.FavoriteChatsStore
 import `in`.yashd.bitchat.ui.relay.PinnedChatsStore
@@ -271,6 +272,8 @@ fun RelayHome(
                     )
                     onlineEntry -> OnlineChatScreen(
                         model::addInternetConversation,
+                        npub = internet.npub,
+                        inboxSummary = inboxStatusSummary(internet.readyToShare, internet.setup.finished, internet.inboxes),
                         open = { npub ->
                             onlineEntry = false
                             tab = 0
@@ -329,6 +332,7 @@ fun RelayHome(
                         openChat = openChat,
                         newChat = { newChat = true },
                         discover = { goTab(1) },
+                        newInternetChat = { onlineEntry = true },
                         pinned = pinned,
                         togglePin = togglePin,
                         deleteChat = deleteChat,
@@ -472,7 +476,7 @@ private fun NewChatSheet(dismiss: () -> Unit, nearby: () -> Unit, online: () -> 
                 )
                 RowDivider()
                 RelayListRow(
-                    R.drawable.relay_broadcast, "Chat Online", "Add a friend once with their public Relay ID",
+                    R.drawable.relay_broadcast, "New internet chat", "Add a friend once with their Internet ID",
                     iconTint = RelayColors.Nostr, onClick = online
                 )
             }

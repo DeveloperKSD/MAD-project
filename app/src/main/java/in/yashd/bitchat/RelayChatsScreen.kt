@@ -85,6 +85,7 @@ internal fun RelayChatsScreen(
     openChat: (String) -> Unit,
     newChat: () -> Unit,
     discover: () -> Unit,
+    newInternetChat: () -> Unit = {},
     pinned: List<String> = emptyList(),
     togglePin: (String) -> Unit = {},
     deleteChat: (String) -> Unit = {},
@@ -236,11 +237,18 @@ internal fun RelayChatsScreen(
                             loading -> EmptyCard(R.drawable.relay_clock, "Loading your chats…", "Saved Internet chats are being opened securely.")
                             storageProblem && items.isEmpty() -> EmptyCard(R.drawable.relay_info, "Saved Internet chats are unavailable",
                                 "Your history wasn't deleted. Nearby chats still work.")
+                            filter == "Internet" && query.isEmpty() -> EmptyCard(R.drawable.relay_broadcast, "No internet chats",
+                                "Add a friend with their Internet ID to chat from anywhere.") {
+                                TextButton(onClick = newInternetChat) { Text("Start an internet chat", color = RelayColors.Blue) }
+                            }
                             query.isNotEmpty() || filter != "All" -> EmptyCard(R.drawable.relay_search, "No chats found",
                                 "Try another name or filter.")
                             else -> EmptyCard(R.drawable.relay_chat, "No chats yet",
-                                "Find people around you in Discover, or tap + to message a friend online.") {
-                                TextButton(onClick = discover) { Text("Find people nearby", color = RelayColors.Blue) }
+                                "Find people around you in Discover, or start an internet chat with a friend's Internet ID.") {
+                                Row {
+                                    TextButton(onClick = discover) { Text("Find people nearby", color = RelayColors.Blue) }
+                                    TextButton(onClick = newInternetChat) { Text("Start an internet chat", color = RelayColors.Blue) }
+                                }
                             }
                         }
                     }
