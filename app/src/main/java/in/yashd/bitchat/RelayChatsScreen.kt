@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -64,162 +65,6 @@ import `in`.yashd.bitchat.ui.relay.RelayUiState
 import `in`.yashd.bitchat.ui.relay.RelayViewModel
 import `in`.yashd.bitchat.ui.relay.relayConversations
 
-// ---------------------------------------------------------------------------
-// Routes: which conversation is open.
-//   "nearby:<peerId>"  private Bluetooth chat
-//   "nearby:"          the public Nearby group
-//   "internet:<npub>"  Internet (Nostr) chat
-// ---------------------------------------------------------------------------
-
-internal fun nearbyRoute(peerId: String?): String = "nearby:" + (peerId ?: "")
-internal fun internetRoute(npub: String): String = "internet:$npub"
-internal fun routeIsNearby(route: String): Boolean = route.startsWith("nearby:")
-internal fun routeTarget(route: String): String? = route.substringAfter(':').ifEmpty { null }
-
-private fun PeerState?.isLinked(): Boolean =
-    this != null && (state == PeerConnectionState.Connected || state == PeerConnectionState.Authenticated)
-
-/** Everything the screens need to show about one conversation or contact. */
-internal data class RouteInfo(
-    val route: String,
-    val nearby: Boolean,
-    val target: String?,
-    val title: String,
-    val linkText: String,
-    val online: Boolean,
-    val peer: PeerState?,
-    val publicId: String
-) {
-    val isGroup: Boolean get() = nearby && target == null
-}
-
-internal fun describeRoute(route: String, mesh: MeshUiState, internet: RelayUiState): RouteInfo {
-    val target = routeTarget(route)
-    if (routeIsNearby(route)) {
-        val peer = target?.let { id -> mesh.peers.firstOrNull { it.identity.peerId == id } }
-        val linked = mesh.serviceRunning && peer.isLinked()
-        val inRange = mesh.peers.count { it.isLinked() }
-        val title = when {
-            target == null -> "Nearby group"
-            peer != null && peer.identity.displayName.isNotBlank() -> peer.identity.displayName
-            else -> target.take(12)
-        }
-        val linkText = when {
-            target == null -> if (mesh.serviceRunning) "Public group • $inRange in range" else "Public group • Nearby is off"
-            !mesh.serviceRunning -> "Offline • Nearby is off"
-            peer == null -> "Offline • No route"
-            linked -> "BLE only • Nearby"
-            peer.state == PeerConnectionState.Connecting -> "BLE only • Connecting…"
-            peer.state == PeerConnectionState.Failed -> "BLE only • Connection failed"
-            peer.state == PeerConnectionState.Disconnected -> "Offline • No route"
-            else -> "BLE only • Found nearby"
-        }
-        return RouteInfo(
-            route = route,
-            nearby = true,
-            target = target,
-            title = title,
-            linkText = linkText,
-            online = if (target == null) mesh.serviceRunning else linked,
-            peer = peer,
-            publicId = target.orEmpty()
-        )
-    }
-    val npub = target.orEmpty()
-    val key = runCatching { RelayViewModel.recipientKey(npub) }.getOrNull()
-    val record = internet.conversations.firstOrNull { it.publicKey == key }
-    val linkText = when {
-        internet.inboxes.isEmpty() -> "Nostr only • Not set up"
-        internet.inboxesConnected -> "Nostr only • Relay connected"
-        else -> "Nostr only • Relay offline"
-    }
-    return RouteInfo(
-        route = route,
-        nearby = false,
-        target = npub,
-        title = record?.displayName?.ifBlank { null } ?: shortId(npub, 12, 6),
-        linkText = linkText,
-        online = internet.inboxesConnected,
-        peer = null,
-        publicId = npub
-    )
-}
-
-/** Messages of one Nearby conversation (same rule the old chat screen used). */
-internal fun nearbyThread(mesh: MeshUiState, peerId: String?): List<ChatMessage> =
-    mesh.currentConversation.filter { m ->
-        if (peerId == null) !m.isPrivate && m.recipientId == null
-        else m.isPrivate && (m.senderId == peerId || m.recipientId == peerId)
-    }
-
-/** Messages of one Internet conversation. */
-internal fun internetThread(internet: RelayUiState, npub: String): List<InternetMessage> {
-    val key = runCatching { RelayViewModel.recipientKey(npub) }.getOrNull() ?: return emptyList()
-    return if (internet.threadPeer == key) internet.thread else internet.messages.filter { it.peer == key }
-}
-
-/** One row of the Chats list. */
-internal data class ChatListItem(
-    val info: RouteInfo,
-    val preview: String,
-    val lastAtMs: Long?,
-    val waiting: Boolean,
-    val failed: Boolean,
-    val unread: Int
-)
-
-/**
- * Builds the Chats list from the existing conversation data (relayConversations) and adds
- * the extra details the design shows: time, connection line and unread count.
- * Unread counts only live in memory: messages that arrive after you last opened a chat.
- */
-internal fun buildChatList(
-    internet: RelayUiState,
-    mesh: MeshUiState,
-    seenAt: Map<String, Long>,
-    sessionStart: Long
-): List<ChatListItem> {
-    val names = mesh.peers.associate { it.identity.peerId to it.identity.displayName }
-    return relayConversations(internet, mesh).mapNotNull { row ->
-        val route = when (row.transport) {
-            ConversationTransport.Nearby -> nearbyRoute(row.recipient)
-            ConversationTransport.Internet -> internetRoute(row.recipient ?: return@mapNotNull null)
-        }
-        val info = describeRoute(route, mesh, internet)
-        val since = seenAt[route] ?: sessionStart
-        if (info.nearby) {
-            val thread = nearbyThread(mesh, info.target)
-            val last = thread.lastOrNull()
-            val mineLast = last?.direction == MessageDirection.Outbound
-            val preview = when {
-                last == null -> row.preview
-                info.isGroup && !mineLast -> (names[last.senderId]?.ifBlank { null } ?: last.senderId.take(8)) + ": " + last.body
-                else -> last.body
-            }
-            ChatListItem(
-                info = info,
-                preview = preview,
-                lastAtMs = last?.createdAtMs,
-                waiting = mineLast && last?.status == MessageStatus.Pending,
-                failed = mineLast && last?.status == MessageStatus.Failed,
-                unread = thread.count { it.direction == MessageDirection.Inbound && (it.receivedAtMs ?: it.createdAtMs) > since }
-            )
-        } else {
-            val thread = internetThread(internet, info.publicId)
-            val last = thread.lastOrNull()
-            val mineLast = last?.outgoing == true
-            ChatListItem(
-                info = info,
-                preview = last?.body ?: row.preview,
-                lastAtMs = last?.createdAtMs?.takeIf { it > 0 }
-                    ?: internet.conversations.firstOrNull { it.publicKey == last?.peer || it.npub == info.publicId }?.lastMessageAtMs,
-                waiting = mineLast && last?.status == "Sending…",
-                failed = mineLast && last?.status?.startsWith("Failed") == true,
-                unread = thread.count { !it.outgoing && it.createdAtMs > since }
-            )
-        }
-    }.sortedByDescending { it.lastAtMs ?: 0L }
-}
 
 // ---------------------------------------------------------------------------
 // Chats screen (Figma 1)
@@ -443,22 +288,22 @@ internal fun RelaySearchField(value: String, onChange: (String) -> Unit, placeho
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp)
-            .height(48.dp)
-            .clip(RoundedCornerShape(24.dp))
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .height(44.dp)
+            .clip(RoundedCornerShape(22.dp))
             .background(RelayColors.Card)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        RIcon(R.drawable.relay_search, null, tint = RelayColors.TextSecondary, size = 20.dp)
-        Spacer(Modifier.width(12.dp))
+        RIcon(R.drawable.relay_search, null, tint = RelayColors.TextSecondary, size = 18.dp)
+        Spacer(Modifier.width(10.dp))
         Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-            if (value.isEmpty()) Text(placeholder, color = RelayColors.TextMuted, fontSize = 15.sp)
+            if (value.isEmpty()) Text(placeholder, color = RelayColors.TextMuted, fontSize = 14.sp)
             BasicTextField(
                 value = value,
                 onValueChange = onChange,
                 singleLine = true,
-                textStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 15.sp),
+                textStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 14.sp),
                 cursorBrush = SolidColor(RelayColors.Blue),
                 modifier = Modifier.fillMaxWidth()
             )
@@ -488,7 +333,7 @@ private fun FilterChipsRow(
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -496,25 +341,25 @@ private fun FilterChipsRow(
             val isOn = key == selected
             Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(if (isOn) RelayColors.BlueSelected else Color.Transparent)
-                    .border(1.dp, if (isOn) RelayColors.Blue.copy(alpha = 0.5f) else RelayColors.Divider, RoundedCornerShape(16.dp))
+                    .clip(CircleShape)
+                    .background(if (isOn) RelayColors.BlueSelected else RelayColors.Card)
                     .combinedClickable(onClick = { onSelect(key) }, onLongClick = onLong)
-                    .padding(horizontal = 14.dp, vertical = 7.dp)
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
-                Text(label, color = if (isOn) Color.White else RelayColors.TextPrimary, fontSize = 13.sp)
+                Text(label, color = if (isOn) RelayColors.Blue else RelayColors.TextPrimary,
+                    fontSize = 14.sp, fontWeight = FontWeight.Medium)
             }
         }
         chatFilters.forEach { name -> chip(name, name, null) }
         lists.forEach { (id, listName) -> chip(listName, "list:" + id) { confirmList = id to listName } }
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(16.dp))
-                .border(1.dp, RelayColors.Divider, RoundedCornerShape(16.dp))
+                .clip(CircleShape)
+                .background(RelayColors.Card)
                 .clickable { onCreate(true) }
-                .padding(horizontal = 14.dp, vertical = 7.dp)
+                .padding(horizontal = 14.dp, vertical = 6.dp)
         ) {
-            Text("+ New list", color = RelayColors.Blue, fontSize = 13.sp)
+            Text("+ New list", color = RelayColors.Blue, fontSize = 14.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -528,11 +373,11 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
+            .padding(horizontal = 16.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        ConversationAvatar(info, 48)
-        Spacer(Modifier.width(14.dp))
+        ConversationAvatar(info, 42)
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -540,7 +385,7 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite
                     modifier = Modifier.weight(1f),
                     color = RelayColors.TextPrimary,
                     fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -548,7 +393,9 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite
                     RIcon(R.drawable.relay_pin, "Pinned", tint = RelayColors.TextSecondary, size = 14.dp)
                     Spacer(Modifier.width(6.dp))
                 }
-                Text(item.lastAtMs?.let { listTime(it, now) } ?: "", color = RelayColors.TextSecondary, fontSize = 12.sp)
+                // Unread chats get the accent-coloured time, like the reference client.
+                Text(item.lastAtMs?.let { listTime(it, now) } ?: "",
+                    color = if (item.unread > 0) RelayColors.Blue else RelayColors.TextSecondary, fontSize = 12.sp)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -605,7 +452,7 @@ private fun ConnectionLine(item: ChatListItem) {
                 else -> RelayColors.Nostr
             }
             RIcon(icon, null, tint = tint, size = 15.dp)
-            Text(info.linkText, color = RelayColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(info.linkText, color = RelayColors.TextMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -614,12 +461,13 @@ private fun ConnectionLine(item: ChatListItem) {
 private fun UnreadBadge(count: Int) {
     Box(
         modifier = Modifier
-            .size(20.dp)
+            .defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
             .clip(CircleShape)
-            .background(RelayColors.Blue),
+            .background(RelayColors.Blue)
+            .padding(horizontal = 5.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(if (count > 9) "9+" else count.toString(), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Text(if (count > 99) "99+" else count.toString(), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

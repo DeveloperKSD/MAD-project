@@ -163,8 +163,8 @@ internal fun RelayHeader(title: String, myName: String, onAvatar: () -> Unit) {
             text = title,
             modifier = Modifier.weight(1f),
             color = RelayColors.TextPrimary,
-            fontSize = 30.sp,
-            fontWeight = FontWeight.Bold
+            fontSize = 24.sp,
+            fontWeight = FontWeight.SemiBold
         )
         PersonAvatar(
             name = myName.ifBlank { "Me" },
