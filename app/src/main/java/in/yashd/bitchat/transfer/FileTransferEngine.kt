@@ -256,10 +256,12 @@ class FileTransferEngine(
         records.remove(id)
     }
 
-    /** Avoid exposing temp paths or retaining whole files in RAM. Caller owns output. */
+    /** Avoid exposing temp paths or retaining whole files in RAM. Caller owns output.
+     * Both directions keep the owner-only payload until discard, so completed outgoing
+     * files are verified against the manifest hash exactly like received ones. */
     @Synchronized fun copyCompletedTo(id: UUID, output: OutputStream) {
         val record = record(id)
-        check(record.direction == TransferDirection.INCOMING && record.state == TransferState.COMPLETED)
+        check(record.state == TransferState.COMPLETED)
         try {
             checkDataLength(record)
             if (TransferStore.hashFile(store.data(id), record.manifest.sizeBytes) != record.manifest.sha256) failIntegrity(record, TransferFailure.HASH_MISMATCH)

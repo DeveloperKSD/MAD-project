@@ -109,7 +109,7 @@ internal class NearbyAttachmentModel(application: Application) : AndroidViewMode
     /** Quiet gallery thumbnail loading: no busy flag, errors are silent (detail preview still reports them). */
     fun quietPreview(status: BleFileStatus) {
         if (mutable.value.busy || mutable.value.previews.containsKey(status.id)) return
-        if (status.outgoing || status.phase != BleFilePhase.COMPLETED) return
+        if (status.phase != BleFilePhase.COMPLETED) return
         viewModelScope.launch {
             runCatching {
                 val verified = withContext(Dispatchers.IO) {
@@ -127,7 +127,7 @@ internal class NearbyAttachmentModel(application: Application) : AndroidViewMode
         }
     }
     fun preview(status: BleFileStatus) = operation {
-        require(!status.outgoing && status.phase == BleFilePhase.COMPLETED)
+        require(status.phase == BleFilePhase.COMPLETED)
         val verified = withContext(Dispatchers.IO) {
             AttachmentPolicy.checkSpace(privateFiles.directory.usableSpace, status.totalBytes)
             val file = privateFiles.temporary()

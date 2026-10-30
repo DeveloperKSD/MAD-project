@@ -220,7 +220,7 @@ internal fun RelayContactScreen(
                 val attachmentModel = remember(context) { ViewModelProvider(context.activity())[NearbyAttachmentModel::class.java] }
                 val attachmentUi by attachmentModel.state.collectAsState()
                 val allTransfers by MeshRuntime.fileTransfers.collectAsState()
-                val media = allTransfers.filter { it.peer == info.target && !it.outgoing && it.phase == BleFilePhase.COMPLETED }
+                val media = allTransfers.filter { it.peer == info.target && it.phase == BleFilePhase.COMPLETED }
                 var viewerStart by remember { mutableStateOf(-1) }
                 LaunchedEffect(media.map { it.id }) {
                     media.filter { attachmentUi.previews[it.id] == null }.forEach { attachmentModel.quietPreview(it) }
@@ -228,7 +228,7 @@ internal fun RelayContactScreen(
                 val images = media.filter { attachmentUi.previews[it.id]?.bitmap != null }
                 if (images.isEmpty()) {
                     Text(
-                        "Verified photos you receive will show up here.",
+                        "Verified photos you share will show up here.",
                         modifier = Modifier.padding(top = 4.dp, start = 4.dp),
                         color = RelayColors.TextMuted,
                         fontSize = 12.sp

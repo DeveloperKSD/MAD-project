@@ -79,7 +79,7 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
     }
     LaunchedEffect(pickerRequest) { if (pickerRequest > handledRequest) { handledRequest = pickerRequest; picker = true } }
     LaunchedEffect(files.map { it.id to it.phase }) {
-        files.filter { !it.outgoing && it.phase == BleFilePhase.COMPLETED && ui.previews[it.id] == null }.forEach { model.quietPreview(it) }
+        files.filter { it.phase == BleFilePhase.COMPLETED && ui.previews[it.id] == null }.forEach { model.quietPreview(it) }
     }
 
     // Picker: a sheet matching the New Chat sheet, not a dialog.
@@ -128,7 +128,7 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
 
     // Full-screen viewer with left/right swipe across verified received images.
     if (viewerIndex >= 0) {
-        val viewable = files.filter { it.phase == BleFilePhase.COMPLETED && !it.outgoing }
+        val viewable = files.filter { it.phase == BleFilePhase.COMPLETED }
         if (viewable.isEmpty()) viewerIndex = -1
         else AttachmentPagerViewer(viewable, ui.previews, viewerIndex, model::quietPreview) { viewerIndex = -1 }
     }
@@ -138,7 +138,7 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
         if (file == null) detailId = null else ModalBottomSheet(onDismissRequest = { detailId = null }, containerColor = RelayColors.Card) {
             TransferDetail(file, connected, ui.busy, ui.labels[file.id], ui.previews[file.id], ui.message,
                 onAction = { model.action(file, it) }, onPreview = { model.preview(file) },
-                onView = { viewerIndex = files.filter { it.phase == BleFilePhase.COMPLETED && !it.outgoing }.indexOfFirst { it.id == file.id } },
+                onView = { viewerIndex = files.filter { it.phase == BleFilePhase.COMPLETED }.indexOfFirst { it.id == file.id } },
                 onSave = { verified ->
                     destinationId = file.id.toString()
                     val name = "attachment-${file.id.toString().take(8)}.${verified.kind.extension}"
@@ -240,8 +240,8 @@ internal fun TransferDetail(file: BleFileStatus, connected: Boolean, busy: Boole
                 TextButton(enabled = !busy, onClick = { onAction(BleFileAction.CANCEL) }) { Text("Cancel transfer") }
             }
         }
-        if (file.phase == BleFilePhase.COMPLETED && !file.outgoing) {
-            if (verified == null) TextButton(enabled = !busy, onClick = onPreview) { Text("Check / preview received file") }
+        if (file.phase == BleFilePhase.COMPLETED) {
+            if (verified == null) TextButton(enabled = !busy, onClick = onPreview) { Text(if (file.outgoing) "View verified sent file" else "Check / preview received file") }
             verified?.let {
                 it.bitmap?.let { bmp -> Image(bmp.asImageBitmap(), "Verified received image", Modifier.fillMaxWidth().heightIn(max = 200.dp).clip(RoundedCornerShape(10.dp)).clickable(onClick = onView)) }
                 if (it.kind == AttachmentKind.PDF) Text("PDF verified. Open saved PDFs only with a trusted viewer.", color = RelayColors.TextSecondary, fontSize = RelayType.Label)
