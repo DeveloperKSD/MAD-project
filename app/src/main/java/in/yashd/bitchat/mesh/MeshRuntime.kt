@@ -38,6 +38,11 @@ object MeshRuntime {
     private lateinit var readinessChecker: BluetoothReadinessChecker
     private lateinit var peerManager: PeerManager
     private lateinit var messageStore: MessageStore
+    private lateinit var requestsStore: NearbyRequestsStore
+    /** Signed control messages (e.g. request_accept) awaiting a route, retried with the queue. */
+    private val pendingControls = LinkedHashMap<String, String>()
+    private val _pendingRequests = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val pendingRequests: StateFlow<Map<String, Long>> = _pendingRequests
 
     @Volatile private var localIdentity: LocalIdentity? = null
     private val fileDispatcher = Dispatchers.IO.limitedParallelism(1)
@@ -83,6 +88,9 @@ object MeshRuntime {
         peerManager = PeerManager()
         messageStore = MessageStore(appContext)
         if (messageStore.storageError) addError("Nearby history is unavailable; existing data was preserved.")
+        requestsStore = NearbyRequestsStore(appContext)
+        requestsStore.seedAccepted(messageStore.knownPeerIds())
+        scope.launch { requestsStore.pending.collect { _pendingRequests.value = it } }
         scope.launch {
             peerManager.peers.collect { publishState() }
         }
@@ -175,7 +183,52 @@ object MeshRuntime {
         // Out-of-range friends are queued, never blocked and never sent to the public group.
         val message = runCatching { messageStore.createOutbound(identity.peerId, peerId, body, peerId != null) }
             .getOrElse { addError("Nearby history is unavailable; existing data was preserved."); return@launch }
+        // Starting a chat ourselves means it belongs in our own chat list.
+        if (peerId != null && ::requestsStore.isInitialized) requestsStore.accept(peerId)
         dispatchOutbound(message)
+    }
+
+    /** Accept an incoming chat request: the chat joins the list and they get a signed accept. */
+    fun acceptRequest(peerId: String) = scope.launch {
+        if (!::requestsStore.isInitialized) return@launch
+        requestsStore.accept(peerId)
+        pendingControls["$peerId:request_accept"] = peerId
+        sendControl(peerId, "request_accept")
+    }
+
+    /** Decline a request: it leaves the list along with its messages on this phone only. */
+    fun declineRequest(peerId: String) = scope.launch {
+        if (!::requestsStore.isInitialized) return@launch
+        requestsStore.decline(peerId)
+        deleteConversation(peerId)
+    }
+
+    private fun sendControl(peerId: String, kind: String): Boolean {
+        val identity = localIdentity ?: return false
+        val payload = JSONObject().put("kind", kind).toString().encodeToByteArray()
+        val packet = runCatching {
+            PacketCodec.createSigned(PacketType.CONTROL, identity.peerId, peerId, payload, identity.signingPrivateKey)
+        }.getOrNull() ?: return false
+        val accepted = runCatching { transport?.send(PacketCodec.encode(packet)) == true }.getOrDefault(false)
+        if (accepted) pendingControls.remove("$peerId:$kind")
+        return accepted
+    }
+
+    private fun handleControl(decoded: MeshPacket) {
+        val json = runCatching { JSONObject(decoded.payload.decodeToString()) }.getOrNull() ?: return
+        if (decoded.recipientId != localIdentity?.peerId) return
+        if (json.optString("kind") != "request_accept" || !::requestsStore.isInitialized) return
+        val sender = peerManager.get(decoded.senderId)
+        if (requestsStore.markAcceptedBy(decoded.senderId)) {
+            val local = localIdentity ?: return
+            `in`.yashd.bitchat.notifications.MessageNotifications.stored(
+                appContext,
+                `in`.yashd.bitchat.ui.relay.MutedChatsStore.key("nearby", local.peerId, decoded.senderId),
+                `in`.yashd.bitchat.nearbyRoute(decoded.senderId),
+                sender?.identity?.displayName.orEmpty(),
+                "Accepted your chat request"
+            )
+        }
     }
 
     /**
@@ -235,6 +288,9 @@ object MeshRuntime {
     fun flushQueued() = scope.launch {
         if (!::messageStore.isInitialized) return@launch
         messageStore.pendingOutbound().forEach { dispatchOutbound(it) }
+        pendingControls.entries.toList().forEach { (key, peerId) ->
+            sendControl(peerId, key.substringAfter(':'))
+        }
     }
 
     /** Original Stage 2A service APIs; Stage 2B UI uses the result-bearing APIs below.
@@ -391,6 +447,7 @@ object MeshRuntime {
             PacketType.MESSAGE -> handleMessage(decoded, encrypted = false)
             PacketType.ENCRYPTED -> handleMessage(decoded, encrypted = true)
             PacketType.ACK -> handleAck(decoded)
+            PacketType.CONTROL -> handleControl(decoded)
             PacketType.PING -> sendSimple(PacketType.PONG, decoded.senderId, ByteArray(0))
             else -> Unit
         }
@@ -424,7 +481,15 @@ object MeshRuntime {
         val notificationNow = System.currentTimeMillis()
         notificationPackets.entries.removeAll { it.value < notificationNow - 10 * 60_000 }
         val firstReceipt = notificationPackets.put(decoded.packetId.toHex(), decoded.timestampMs) == null
-        if (inserted && firstReceipt && `in`.yashd.bitchat.notifications.NotificationPolicy.isLive(decoded.timestampMs, receiveStartedAt, System.currentTimeMillis())) {
+        val live = `in`.yashd.bitchat.notifications.NotificationPolicy.isLive(decoded.timestampMs, receiveStartedAt, System.currentTimeMillis())
+        // Private messages from someone new wait in Requests instead of alerting as a chat.
+        if (encrypted && ::requestsStore.isInitialized && !requestsStore.isAccepted(decoded.senderId)) {
+            if (requestsStore.addPending(decoded.senderId, notificationNow) && live) {
+                val key = `in`.yashd.bitchat.ui.relay.MutedChatsStore.key("nearby", local.peerId, decoded.senderId)
+                `in`.yashd.bitchat.notifications.MessageNotifications.stored(appContext, key, "requests",
+                    sender?.identity?.displayName.orEmpty(), "Wants to message you")
+            }
+        } else if (inserted && firstReceipt && live) {
             val route = `in`.yashd.bitchat.nearbyRoute(if (encrypted) decoded.senderId else null)
             val key = `in`.yashd.bitchat.ui.relay.MutedChatsStore.key("nearby", local.peerId, if (encrypted) decoded.senderId else null)
             `in`.yashd.bitchat.notifications.MessageNotifications.stored(appContext, key, route,

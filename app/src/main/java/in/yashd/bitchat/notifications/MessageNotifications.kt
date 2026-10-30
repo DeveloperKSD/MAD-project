@@ -55,7 +55,7 @@ object MessageNotifications {
         return CHANNEL_V2
     }
 
-    fun stored(context: Context, key: String, route: String, name: String) {
+    fun stored(context: Context, key: String, route: String, name: String, text: String = "New message") {
         // Delivery is best effort and must never change the success of message storage.
         runCatching {
             val mutes = MutedChatsStore(context)
@@ -67,7 +67,7 @@ object MessageNotifications {
                 .setData(Uri.parse("relay://message/" + Uri.encode(key)))
                 .putExtra(EXTRA_ROUTE, route)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            post(context, key, intent, name.ifBlank { "Relay" }, "New message")
+            post(context, key, intent, name.ifBlank { "Relay" }, text)
         }
     }
 
@@ -90,7 +90,7 @@ object MessageNotifications {
     fun consume(intent: Intent?): String? {
         val route = intent?.getStringExtra(EXTRA_ROUTE) ?: return null
         intent.removeExtra(EXTRA_ROUTE)
-        return route.takeIf { it == "nearby:" || it.matches(Regex("nearby:[0-9a-f]+")) ||
+        return route.takeIf { it == "requests" || it == "nearby:" || it.matches(Regex("nearby:[0-9a-f]+")) ||
             it.startsWith("internet:") && runCatching {
                 `in`.yashd.bitchat.nostr.NostrNpub.decode(it.substringAfter(':'))
             }.isSuccess }

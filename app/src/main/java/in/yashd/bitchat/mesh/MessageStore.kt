@@ -64,6 +64,11 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
         return true
     }
 
+    /** Private-chat peers present in saved history (either direction). */
+    fun knownPeerIds(): Set<String> = messages.values.mapNotNull { m ->
+        if (!m.isPrivate) null else if (m.direction == MessageDirection.Outbound) m.recipientId else m.senderId
+    }.toSet()
+
     /** Outbound messages waiting for a route, oldest first. */
     fun pendingOutbound(): List<ChatMessage> =
         messages.values.filter { it.direction == MessageDirection.Outbound && it.status == MessageStatus.Pending }

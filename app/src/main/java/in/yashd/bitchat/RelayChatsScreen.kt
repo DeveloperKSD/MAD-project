@@ -245,7 +245,9 @@ internal fun RelayChatsScreen(
     deleteChat: (String) -> Unit = {},
     refreshing: Boolean = false,
     onRefresh: () -> Unit = {},
-    toggleFavorite: (String) -> Unit = {}
+    toggleFavorite: (String) -> Unit = {},
+    requestsCount: Int = 0,
+    openRequests: () -> Unit = {}
 ) {
     // Search text can contain private names, so it is kept in memory only.
     var search by remember { mutableStateOf("") }
@@ -296,6 +298,28 @@ internal fun RelayChatsScreen(
             item { RelayHeader("Relay", myName, onAvatar) }
             item { RelaySearchField(search, { search = it }, "Find your friends") }
             item { FilterChipsRow(filter, { filter = it }) }
+            if (requestsCount > 0) {
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(RelayColors.Card)
+                            .clickable { openRequests() }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RIcon(R.drawable.relay_chat, null, tint = RelayColors.Blue, size = 20.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Chat requests", color = RelayColors.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            Text(if (requestsCount == 1) "1 person wants to message you" else "$requestsCount people want to message you",
+                                color = RelayColors.TextSecondary, fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
             if (visible.isEmpty()) {
                 item {
                     Box(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {

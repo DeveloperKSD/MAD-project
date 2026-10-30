@@ -95,6 +95,8 @@ fun RelayHome(
     var setupOpen by rememberSaveable { mutableStateOf(false) }
     var nearbyDetails by rememberSaveable { mutableStateOf(false) }
     var newChat by remember { mutableStateOf(false) }
+    var requestsOpen by rememberSaveable { mutableStateOf(false) }
+    val pendingRequests by MeshRuntime.pendingRequests.collectAsState()
     // Mutes persist independently; unread markers persist encrypted across restarts.
     val muteContext = LocalContext.current
     val muteStore = remember { `in`.yashd.bitchat.ui.relay.MutedChatsStore(muteContext) }
@@ -128,7 +130,9 @@ fun RelayHome(
             model.loadConversation(routeTarget(chatRoute).orEmpty())
         }
     }
+    // Chats from people not yet accepted wait in Requests instead of the main list.
     val items = buildChatList(internet, mesh, savedSeen, sessionStart)
+        .filter { !(it.info.nearby && it.info.target != null && it.info.target in pendingRequests) }
     fun favoriteKey(route: String): String? = runCatching {
         if (routeIsNearby(route)) FavoriteChatsStore.key("nearby", mesh.localPeerId, routeTarget(route))
         else FavoriteChatsStore.key("internet", internet.publicKey,
@@ -154,6 +158,7 @@ fun RelayHome(
         onlineEntry = false
         setupOpen = false
         nearbyDetails = false
+        requestsOpen = false
         tab = index
     }
     val openChat: (String) -> Unit = { route ->
@@ -183,14 +188,14 @@ fun RelayHome(
         if (routeIsNearby(route)) MeshRuntime.deleteConversation(target, deleted)
         else if (target != null) model.deleteConversation(target, deleted)
     }
-    val atRoot = chatRoute == null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails
-    val showingChat = chatRoute != null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails
+    val atRoot = chatRoute == null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails && !requestsOpen
+    val showingChat = chatRoute != null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails && !requestsOpen
 
     LaunchedEffect(notificationRoute) {
         notificationRoute?.let { route ->
             goTab(0)
             newChat = false
-            chat = route
+            if (route == "requests") requestsOpen = true else chat = route
             notificationConsumed()
         }
     }
@@ -201,6 +206,7 @@ fun RelayHome(
 
     BackHandler(enabled = !atRoot || tab != 0) {
         when {
+            requestsOpen -> requestsOpen = false
             setupOpen -> setupOpen = false
             onlineEntry -> onlineEntry = false
             nearbyDetails -> nearbyDetails = false
@@ -237,6 +243,13 @@ fun RelayHome(
             ) {
                 internet.error?.takeIf { !setupOpen }?.let { ErrorBanner(it, model::clearError) }
                 when {
+                    requestsOpen -> RequestsPage(
+                        mesh = mesh,
+                        pending = pendingRequests,
+                        back = { requestsOpen = false },
+                        accept = { MeshRuntime.acceptRequest(it) },
+                        decline = { MeshRuntime.declineRequest(it) }
+                    )
                     setupOpen -> InternetSetupScreen(
                         internet, model::updateSetupServers, model::setupBack, model::setupNext,
                         model::announce, model::retrySetup,
@@ -306,6 +319,8 @@ fun RelayHome(
                         pinned = pinned,
                         togglePin = togglePin,
                         deleteChat = deleteChat,
+                        requestsCount = pendingRequests.size,
+                        openRequests = { requestsOpen = true },
                         refreshing = refreshing,
                         onRefresh = {
                             scope.launch {
