@@ -119,8 +119,12 @@ fun RelayStartFlow(content: @Composable () -> Unit) {
         val upgrade = info != null && info.lastUpdateTime != info.firstInstallTime
         val processStartWall = System.currentTimeMillis() - SystemClock.elapsedRealtime() + Process.getStartElapsedRealtime()
         val identityFile = File(context.applicationInfo.dataDir, "shared_prefs/identity.xml")
-        val establishedIdentity = runCatching { identityFile.exists() && identityFile.lastModified() < processStartWall }.getOrDefault(false)
-        val existing = upgrade || establishedIdentity
+        // Durable evidence of real use is the identity file itself: it must exist (an install
+        // that never finished setup has none) and either predate this process or belong to an
+        // upgraded app (whose legacy identity may have been rewritten on this very launch).
+        val fileExists = runCatching { identityFile.exists() && identityFile.length() > 0 }.getOrDefault(false)
+        val predatesProcess = runCatching { identityFile.lastModified() < processStartWall }.getOrDefault(false)
+        val existing = fileExists && (predatesProcess || upgrade)
         if (!done && existing) prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
         !done && !existing
     }
