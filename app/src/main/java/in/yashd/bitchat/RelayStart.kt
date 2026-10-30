@@ -53,6 +53,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import android.content.Context
+import android.os.Process
+import android.os.SystemClock
+import java.io.File
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -109,10 +112,17 @@ fun RelayStartFlow(content: @Composable () -> Unit) {
     val prefs = remember { context.applicationContext.getSharedPreferences(START_PREFS, Context.MODE_PRIVATE) }
     val firstRun = remember {
         val done = prefs.getBoolean(KEY_ONBOARDED, false)
+        // Established installs skip onboarding: either the app was upgraded, or a Nearby
+        // identity file from before this process exists. An install that never finished
+        // setup has neither and still gets the first-run flow.
         val info = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
         val upgrade = info != null && info.lastUpdateTime != info.firstInstallTime
-        if (!done && upgrade) prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
-        !done && !upgrade
+        val processStartWall = System.currentTimeMillis() - SystemClock.elapsedRealtime() + Process.getStartElapsedRealtime()
+        val identityFile = File(context.applicationInfo.dataDir, "shared_prefs/identity.xml")
+        val establishedIdentity = runCatching { identityFile.exists() && identityFile.lastModified() < processStartWall }.getOrDefault(false)
+        val existing = upgrade || establishedIdentity
+        if (!done && existing) prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
+        !done && !existing
     }
     // "splash" -> ("username" -> "onboarding" on first run) -> "app".
     var step by rememberSaveable { mutableStateOf("splash") }
