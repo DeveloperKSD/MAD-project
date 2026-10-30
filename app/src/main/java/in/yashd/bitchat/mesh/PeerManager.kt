@@ -40,6 +40,9 @@ class PeerManager {
 
     fun get(peerId: String): PeerState? = peersById[peerId]
 
+    /** Routing hints only, not cryptographic proof of physical proximity. Owning looper. */
+    fun routeLinks(peerId: String): Set<String> = routes[peerId]?.keys?.toSet().orEmpty()
+
     fun linkLost(linkId: String) {
         routes.values.forEach { it.remove(linkId) }
         expire()

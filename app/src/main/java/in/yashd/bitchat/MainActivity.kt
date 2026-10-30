@@ -52,38 +52,46 @@ import `in`.yashd.bitchat.mesh.MeshUiState
 import `in`.yashd.bitchat.service.MeshForegroundService
 
 class MainActivity : ComponentActivity() {
+    private var notificationRoute by mutableStateOf<String?>(null)
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        notificationRoute = `in`.yashd.bitchat.notifications.MessageNotifications.consume(intent)
+    }
+
     private val internetModel by lazy {
         androidx.lifecycle.ViewModelProvider(this, object : androidx.lifecycle.ViewModelProvider.Factory {
             override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
                 @Suppress("UNCHECKED_CAST")
                 return `in`.yashd.bitchat.ui.relay.RelayViewModel(
-                    `in`.yashd.bitchat.ui.relay.AndroidInternetBackend(
-                        `in`.yashd.bitchat.nostr.NostrIdentityManager(applicationContext)),
-                    history = `in`.yashd.bitchat.data.internet.RoomInternetHistoryRepository(applicationContext)) as T
+                    (application as RelayApplication).internetRuntime) as T
             }
         })[`in`.yashd.bitchat.ui.relay.RelayViewModel::class.java]
     }
 
-    override fun onStart() {
-        super.onStart()
-        internetModel.start()
-    }
-
-    override fun onStop() {
-        internetModel.stop()
-        super.onStop()
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        (application as RelayApplication).prepareForegroundIdentity()
         enableEdgeToEdge(
             statusBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
         )
+        `in`.yashd.bitchat.notifications.MessageNotifications.channels(this)
+        notificationRoute = `in`.yashd.bitchat.notifications.MessageNotifications.consume(intent)
+        val permissionPrefs = getSharedPreferences("notification_permission", MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= 33 && !permissionPrefs.getBoolean("requested", false) &&
+            ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            if (permissionPrefs.edit().putBoolean("requested", true).commit())
+                notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
         MeshRuntime.initialize(applicationContext)
         setContent {
             // Splash and onboarding from the Figma (RelayStart.kt), then the app as before.
-            RelayStartFlow { RelayMeshHost(internetModel) }
+            RelayStartFlow {
+                RelayMeshHost(internetModel, notificationRoute) { notificationRoute = null }
+            }
         }
     }
 
@@ -95,7 +103,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun RelayMeshHost(model: `in`.yashd.bitchat.ui.relay.RelayViewModel) {
+private fun RelayMeshHost(model: `in`.yashd.bitchat.ui.relay.RelayViewModel, notificationRoute: String?, consumed: () -> Unit) {
     val context = LocalContext.current
     val state by MeshRuntime.state.collectAsState()
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -115,6 +123,7 @@ private fun RelayMeshHost(model: `in`.yashd.bitchat.ui.relay.RelayViewModel) {
             .onFailure { model.error("Couldn’t open Bluetooth settings.") }
     }
     RelayHome(model, state, start, stop, request, bluetoothSettings,
+        notificationRoute = notificationRoute, notificationConsumed = consumed,
         nearbySettings = {
             item { SectionLabel("Nearby identity") }
             item { IdentityPanel(state,
@@ -470,8 +479,5 @@ private fun copyToClipboard(context: Context, label: String, text: String) {
 
 private fun runtimePermissions(): Array<String> {
     val permissions = BluetoothReadinessChecker.requiredPermissions().toMutableList()
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        permissions += android.Manifest.permission.POST_NOTIFICATIONS
-    }
     return permissions.toTypedArray()
 }

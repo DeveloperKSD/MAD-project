@@ -62,6 +62,10 @@ class RoomInternetHistoryRepository(
             }, rows.map(::saved))
         }
     }
+    override suspend fun containsRumor(owner: String, id: String): Boolean = access { _, dao ->
+        validateKey(owner); validateKey(id)
+        dao.rumor(owner, id) != null
+    }
     override suspend fun changes(owner: String, id: String?, peer: String?): HistorySnapshot = access { db, dao ->
         validateKey(owner)
         db.withTransaction {

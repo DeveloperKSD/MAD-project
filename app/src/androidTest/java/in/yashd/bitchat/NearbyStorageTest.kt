@@ -30,6 +30,15 @@ class NearbyStorageTest {
         KeyStore.getInstance("AndroidKeyStore").apply { load(null); deleteEntry(alias) }
     }
 
+    @Test fun incomingInsertReportsSuccessOnlyForNewDurablyStoredPackets() {
+        val store = MessageStore(context, cipher())
+        assertTrue(store.addInbound("incoming-packet", "bob", "alice", "private", true))
+        assertFalse(store.addInbound("incoming-packet", "bob", "alice", "private", true))
+        val reopened = MessageStore(context, cipher())
+        assertFalse(reopened.addInbound("incoming-packet", "bob", "alice", "private", true))
+        assertEquals("private", reopened.conversation.value.single().body)
+    }
+
     @Test fun privateHistoryEncryptsAndOnlyTheRecipientCanAcknowledge() {
         val store = MessageStore(context, cipher())
         val sent = store.createOutbound("alice", "bob", "PRIVATE_NEARBY_BODY", true)

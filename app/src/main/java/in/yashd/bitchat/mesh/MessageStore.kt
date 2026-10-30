@@ -40,8 +40,8 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
         return message
     }
 
-    fun addInbound(packetIdHex: String, senderId: String, recipientId: String?, body: String, isPrivate: Boolean) {
-        if (messages.values.any { it.packetIdHex == packetIdHex }) return
+    fun addInbound(packetIdHex: String, senderId: String, recipientId: String?, body: String, isPrivate: Boolean): Boolean {
+        if (messages.values.any { it.packetIdHex == packetIdHex }) return false
         val now = System.currentTimeMillis()
         put(
             ChatMessage(
@@ -57,6 +57,7 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
                 direction = MessageDirection.Inbound
             )
         )
+        return true
     }
 
     fun updateStatus(messageId: String, packetIdHex: String?, status: MessageStatus) {

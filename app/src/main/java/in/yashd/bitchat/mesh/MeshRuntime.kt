@@ -17,10 +17,19 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import java.io.InputStream
+import java.io.OutputStream
+import java.util.UUID
+import `in`.yashd.bitchat.transfer.*
+import `in`.yashd.bitchat.transfer.ble.*
 
 object MeshRuntime {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate +
         CoroutineExceptionHandler { _, _ -> addError("Nearby operation failed; existing data was preserved. Retry after checking Bluetooth and local storage.") })
+    private val notificationPackets = HashMap<String, Long>()
     private val seenPackets = LinkedHashMap<String, Long>()
     private val cryptoBox = CryptoBox()
 
@@ -30,7 +39,36 @@ object MeshRuntime {
     private lateinit var peerManager: PeerManager
     private lateinit var messageStore: MessageStore
 
-    private var localIdentity: LocalIdentity? = null
+    @Volatile private var localIdentity: LocalIdentity? = null
+    private val fileDispatcher = Dispatchers.IO.limitedParallelism(1)
+    private val fileScope = CoroutineScope(SupervisorJob() + fileDispatcher +
+        CoroutineExceptionHandler { _, _ -> addError("File transfer paused; saved files were preserved.") })
+    private val fileInbox = Channel<TransportPacket>(32)
+    private var fileController: BleFileController? = null
+    private var fileUnavailable = false
+    private val fileSeen = linkedMapOf<String, Long>()
+    private val fileState = MutableStateFlow<List<BleFileStatus>>(emptyList())
+    val fileTransfers: StateFlow<List<BleFileStatus>> = fileState
+    private val forwardingFiles = BleFileForwardingGate(
+        peer = { id -> if (::peerManager.isInitialized) peerManager.peers.value.firstOrNull { it.identity.peerId == id }?.identity else null },
+        drop = { id -> runBlocking(Dispatchers.Main.immediate) { transport?.cancelQueuedFile(id) } })
+
+    init {
+        fileScope.launch {
+            for (incoming in fileInbox) {
+                runCatching { processFilePacket(incoming) }.onFailure { addError("File transfer unavailable; saved files were preserved.") }
+                fileController?.let { fileState.value = it.state.value }
+            }
+        }
+        fileScope.launch {
+            while (true) {
+                delay(1000)
+                runCatching { forwardingFiles.busy(System.currentTimeMillis()); fileController?.tick() }.onFailure { addError("File transfer paused; check the link and saved files.") }
+                fileController?.let { fileState.value = it.state.value }
+            }
+        }
+    }
+    private var receiveStartedAt = Long.MAX_VALUE
     private var transport: BleTransport? = null
     private var announceJob: Job? = null
 
@@ -74,12 +112,16 @@ object MeshRuntime {
             return@launch
         }
         if (transport != null) return@launch
+        receiveStartedAt = System.currentTimeMillis()
         transport = BleTransport(
             context = appContext,
             onPacket = { packet -> scope.launch { processTransportPacket(packet) } },
             onLinkReady = { scope.launch { sendAnnouncement() } },
             onError = ::addError,
-            onLinkLost = { peerManager.linkLost(it) }
+            onLinkLost = {
+                peerManager.linkLost(it)
+                fileScope.launch { fileController?.linkLost(); forwardingFiles.reset(System.currentTimeMillis()) }
+            }
         ).also { it.start() }
         publishState(serviceRunning = true)
         sendAnnouncement()
@@ -98,6 +140,7 @@ object MeshRuntime {
         announceJob = null
         transport?.stop()
         transport = null
+        fileScope.launch { fileController?.linkLost(); forwardingFiles.reset(System.currentTimeMillis()) }
         if (::peerManager.isInitialized) peerManager.disconnectAll()
         publishState(serviceRunning = false)
     }
@@ -113,6 +156,7 @@ object MeshRuntime {
     fun rotateIdentity() = scope.launch {
         val currentName = localIdentity?.displayName ?: "nearby"
         stop()
+        fileScope.launch { fileController?.close(); fileController = null; fileUnavailable = false }
         localIdentity = runCatching { identityManager.rotateIdentity(currentName) }.getOrElse {
             addError("Nearby identity could not be rotated; existing data was preserved."); return@launch
         }
@@ -174,6 +218,92 @@ object MeshRuntime {
         if (!accepted) addError("No Nearby link accepted the message. Turn on Nearby and retry.")
     }
 
+    /** Original Stage 2A service APIs; Stage 2B UI uses the result-bearing APIs below.
+     * Caller owns source/output streams and must keep them valid until the returned Job ends.
+     */
+    fun offerFile(peerId: String, source: InputStream, multiHop: Boolean = false) = fileAction {
+        check(!forwardingFiles.busy(System.currentTimeMillis())) { "A forwarded transfer owns this device" }
+        it.offer(peerId, source, if (multiHop) TransferProfile.MULTI_HOP_BLE else TransferProfile.DIRECT_BLE)
+    }
+    fun acceptFile(id: UUID) = fileAction { check(!forwardingFiles.busy(System.currentTimeMillis())); it.accept(id) }
+    fun rejectFile(id: UUID) = fileAction { it.reject(id) }
+    fun pauseFile(id: UUID) = fileAction { it.pause(id) }
+    fun resumeFile(id: UUID) = fileAction { check(!forwardingFiles.busy(System.currentTimeMillis())); it.resume(id) }
+    fun cancelFile(id: UUID) = fileAction { it.cancel(id) }
+    fun discardFile(id: UUID) = fileAction { it.discard(id) }
+    fun copyCompletedFile(id: UUID, output: OutputStream) = fileAction { it.copyCompletedTo(id, output) }
+
+    // Result-bearing UI APIs share the same serialized lane as packets, timers and teardown.
+    private suspend fun <T> fileResult(action: (BleFileController) -> T): Result<T> = withContext(fileDispatcher) {
+        try { runCatching { action(files()) } }
+        finally { fileController?.let { fileState.value = it.state.value } }
+    }
+    suspend fun reloadFileTransfers(): Result<Unit> = fileResult { Unit }
+    suspend fun offerAttachment(peerId: String, source: InputStream, multiHop: Boolean): Result<UUID> = fileResult {
+        check(!forwardingFiles.busy(System.currentTimeMillis())) { "Another transfer owns this device" }
+        it.offer(peerId, source, if (multiHop) TransferProfile.MULTI_HOP_BLE else TransferProfile.DIRECT_BLE)
+    }
+    suspend fun copyVerifiedAttachment(id: UUID, output: OutputStream): Result<Unit> = fileResult { it.copyCompletedTo(id, output) }
+    suspend fun attachmentAction(id: UUID, action: BleFileAction): Result<Unit> = fileResult {
+        when (action) {
+            BleFileAction.ACCEPT -> { check(!forwardingFiles.busy(System.currentTimeMillis())); it.accept(id) }
+            BleFileAction.REJECT -> it.reject(id)
+            BleFileAction.PAUSE -> it.pause(id)
+            BleFileAction.RESUME -> { check(!forwardingFiles.busy(System.currentTimeMillis())); it.resume(id) }
+            BleFileAction.CANCEL -> it.cancel(id)
+            BleFileAction.DISCARD -> it.discard(id)
+        }
+    }
+
+    private fun fileAction(action: (BleFileController) -> Unit) = fileScope.launch {
+        runCatching { action(files()) }.onFailure { addError("File action failed or paused; saved files were preserved. Check consent, size limits, and link availability.") }
+        fileController?.let { fileState.value = it.state.value }
+    }
+
+    private fun files(): BleFileController {
+        check(!fileUnavailable && ::appContext.isInitialized)
+        val identity = requireNotNull(localIdentity)
+        fileController?.let { return it }
+        try {
+            val engine = FileTransferEngine(appContext.noBackupFilesDir)
+            return try {
+                BleFileController(identity, engine, AndroidBleFileBindingStore(appContext),
+                    peer = { id -> peerManager.peers.value.firstOrNull { it.identity.peerId == id }?.identity },
+                    direct = { id -> peerManager.peers.value.any { it.identity.peerId == id && it.directDeviceAddress != null } },
+                    send = { packet, low -> runBlocking(Dispatchers.Main.immediate) {
+                        if (localIdentity?.peerId != packet.senderId) false
+                        else {
+                            val links = if (packet.ttl == 0) peerManager.get(packet.recipientId!!)?.directDeviceAddress?.let { setOf(it) }.orEmpty()
+                                else peerManager.routeLinks(packet.recipientId!!)
+                            transport?.send(PacketCodec.encode(packet), if (low) BleFileProtocol.header(packet.payload).id else null, links) == true
+                        }
+                    } }, dropQueued = { id -> runBlocking(Dispatchers.Main.immediate) { transport?.cancelQueuedFile(id) } })
+                    .also { fileController = it }
+            } catch (e: Exception) { engine.close(); throw e }
+        } catch (e: Exception) { fileUnavailable = true; throw e }
+    }
+
+    private fun processFilePacket(incoming: TransportPacket) {
+        val decoded = PacketCodec.decode(incoming.bytes)
+        val identity = localIdentity ?: return
+        if (decoded.senderId == identity.peerId || decoded.recipientId == null) return
+        val now = System.currentTimeMillis()
+        if (decoded.timestampMs !in now - 600_000..now + 60_000) return
+        val remote = peerManager.peers.value.firstOrNull { it.identity.peerId == decoded.senderId }?.identity ?: return
+        if (!PacketCodec.verify(decoded, remote.signingPublicKey)) return
+        val key = decoded.packetId.toHex()
+        fileSeen.entries.removeAll { it.value < now - 600_000 }
+        if (fileSeen.put(key, now) != null) return
+        while (fileSeen.size > 1024) fileSeen.remove(fileSeen.keys.first())
+        if (decoded.recipientId == identity.peerId) {
+            if (!forwardingFiles.busy(now)) files().receive(decoded)
+        } else if (!files().hasActiveTransfer() && forwardingFiles.allow(decoded, now)) runBlocking(Dispatchers.Main.immediate) {
+            val links = peerManager.routeLinks(decoded.recipientId).filter { it != incoming.linkId }.toSet()
+            transport?.send(PacketCodec.encode(decoded.copy(ttl = decoded.ttl - 1)),
+                if (decoded.type == PacketType.FILE_CHUNK) BleFileProtocol.header(decoded.payload).id else null, links)
+        }
+    }
+
     fun deleteMessage(messageId: String) = scope.launch {
         if (!::messageStore.isInitialized) return@launch
         runCatching { messageStore.deleteMessage(messageId) }
@@ -181,9 +311,10 @@ object MeshRuntime {
     }
 
     /** [peerId] null means the public Nearby group. */
-    fun deleteConversation(peerId: String?) = scope.launch {
+    fun deleteConversation(peerId: String?, onDeleted: () -> Unit = {}) = scope.launch {
         if (!::messageStore.isInitialized) return@launch
         runCatching { messageStore.deleteConversation(peerId) }
+            .onSuccess { onDeleted() }
             .onFailure { addError("Couldn't delete the chat; existing data was preserved.") }
     }
 
@@ -212,6 +343,11 @@ object MeshRuntime {
         val decoded = runCatching { PacketCodec.decode(packet.bytes) }
             .onFailure { Log.d("RelayMesh", "Ignoring invalid Nearby packet") }
             .getOrNull() ?: return
+        if (decoded.type == PacketType.FILE_CONTROL || decoded.type == PacketType.FILE_CHUNK) {
+            // Bounded mailbox, crypto/file IO off-main; no task per chunk and no chat parser.
+            fileInbox.trySend(packet)
+            return
+        }
         if (decoded.senderId == localPeerId) return
         val now = System.currentTimeMillis()
         if (decoded.timestampMs !in (now - 10 * 60_000)..(now + 10 * 60_000)) return
@@ -255,13 +391,22 @@ object MeshRuntime {
             decoded.payload
         }
         val json = runCatching { JSONObject(payload.decodeToString()) }.getOrNull() ?: return
-        runCatching { messageStore.addInbound(
+        val inserted = runCatching { messageStore.addInbound(
             packetIdHex = decoded.packetId.toHex(),
             senderId = decoded.senderId,
             recipientId = decoded.recipientId,
             body = json.optString("body"),
             isPrivate = encrypted
         ) }.getOrElse { addError("Nearby history is unavailable; existing data was preserved."); return }
+        val notificationNow = System.currentTimeMillis()
+        notificationPackets.entries.removeAll { it.value < notificationNow - 10 * 60_000 }
+        val firstReceipt = notificationPackets.put(decoded.packetId.toHex(), decoded.timestampMs) == null
+        if (inserted && firstReceipt && `in`.yashd.bitchat.notifications.NotificationPolicy.isLive(decoded.timestampMs, receiveStartedAt, System.currentTimeMillis())) {
+            val route = `in`.yashd.bitchat.nearbyRoute(if (encrypted) decoded.senderId else null)
+            val key = `in`.yashd.bitchat.ui.relay.MutedChatsStore.key("nearby", local.peerId, if (encrypted) decoded.senderId else null)
+            `in`.yashd.bitchat.notifications.MessageNotifications.stored(appContext, key, route,
+                if (encrypted) sender?.identity?.displayName.orEmpty() else "Nearby group")
+        }
         sendAck(decoded.senderId, decoded.packetId.toHex())
     }
 
@@ -306,8 +451,10 @@ object MeshRuntime {
     }
 
     private fun addError(error: String) {
-        val errors = (_state.value.errors + error).takeLast(4)
-        _state.value = _state.value.copy(errors = errors)
+        scope.launch {
+            val errors = (_state.value.errors + error).takeLast(4)
+            _state.value = _state.value.copy(errors = errors)
+        }
     }
 
     private fun publishState(

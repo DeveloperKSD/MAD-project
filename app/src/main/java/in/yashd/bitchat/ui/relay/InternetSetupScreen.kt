@@ -37,11 +37,11 @@ fun InternetSetupScreen(state: RelayUiState, updateServers: (String, String) -> 
                 item { Text("Servers pass encrypted messages between friends. Discovery servers help find your inbox; inbox servers receive your encrypted messages. You choose which operators to use.") }
                 item { Text("Ask a trusted friend or administrator for addresses. Relay does not choose public servers for you.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 item { OutlinedTextField(setup.discoveryDraft,
-                    { updateServers(it, setup.inboxDraft) }, Modifier.fillMaxWidth(), enabled = !state.busy,
+                    { updateServers(it, setup.inboxDraft) }, Modifier.fillMaxWidth(), enabled = !state.busy && !state.configurationLoading && state.configurationError == null,
                     label = { Text("Discovery server addresses") }, supportingText = { Text("1–3 secure wss:// addresses, one per line") },
                     minLines = 2, shape = RoundedCornerShape(18.dp)) }
                 item { OutlinedTextField(setup.inboxDraft,
-                    { updateServers(setup.discoveryDraft, it) }, Modifier.fillMaxWidth(), enabled = !state.busy,
+                    { updateServers(setup.discoveryDraft, it) }, Modifier.fillMaxWidth(), enabled = !state.busy && !state.configurationLoading && state.configurationError == null,
                     label = { Text("Inbox server addresses") }, supportingText = { Text("1–3 secure wss:// addresses, one per line") },
                     minLines = 2, shape = RoundedCornerShape(18.dp)) }
                 item { Text(if (state.discovery.isEmpty()) "Not configured yet" else "Server addresses configured. A saved address alone does not prove a connection works.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -84,11 +84,11 @@ fun InternetSetupScreen(state: RelayUiState, updateServers: (String, String) -> 
                 item { Text("Internet conversations and local names are saved on this device. Message bodies are encrypted locally. They are excluded from backup, so uninstalling or clearing app data loses this history.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
-        (setup.error ?: state.error)?.let { problem -> item { Text(problem, color = MaterialTheme.colorScheme.error) } }
+        (state.configurationError ?: setup.error ?: state.error)?.let { problem -> item { Text(problem, color = MaterialTheme.colorScheme.error) } }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(onClick = if (setup.step == 0) exit else back, enabled = !state.busy, modifier = Modifier.weight(1f)) { Text("Back") }
-                if (setup.step < 2) Button(onClick = next, enabled = !state.busy && (setup.step == 0 || state.readyToShare), modifier = Modifier.weight(1f)) { Text("Next") }
+                if (setup.step < 2) Button(onClick = next, enabled = !state.busy && !state.configurationLoading && state.configurationError == null && (setup.step == 0 || state.readyToShare), modifier = Modifier.weight(1f)) { Text("Next") }
                 else Button(onClick = finish, enabled = !state.busy && state.readyToShare, modifier = Modifier.weight(1f)) { Text("Finish") }
             }
             TextButton(onClick = exit) { Text("Save for later") }

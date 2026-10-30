@@ -249,6 +249,91 @@ class NostrMessagingCoordinator(
             c.connect()
         }
     }
+    /** Finite, silent retrieval. Each page ends at EOSE/deadline; no persistent subscription.
+     * The callback runs synchronously and MUST durably store before returning. Its failures
+     * propagate, so a failed write can never be reported as a successful check.
+     */
+    fun catchUp(relays: List<String>, window: InboxReplayWindow,
+                stored: (UnsignedNostrEvent) -> Unit): Future<Boolean> {
+        val snapshot = relays.distinct().also {
+            require(it.size in 1..3); it.forEach(NostrInbox::validateUrl)
+        }
+        return task {
+            val local = requireNotNull(identity.loadExisting()).publicKeyHex
+            var complete = true
+            snapshot.forEach { url ->
+                if (!catchUpRelay(url, local, window, stored)) complete = false
+            }
+            complete
+        }
+    }
+
+    private fun catchUpRelay(url: String, local: String, window: InboxReplayWindow,
+                             stored: (UnsignedNostrEvent) -> Unit): Boolean {
+        var until = window.until
+        val decoded = hashSetOf<String>() // Bounded by the per-run page/event budget.
+        repeat(window.maxPages) { page ->
+            checkActive()
+            val q = ArrayBlockingQueue<RelayResponse>(window.pageSize + 4)
+            val overflow = AtomicBoolean()
+            val arrivals = java.util.concurrent.atomic.AtomicInteger()
+            val c = client(url, { response ->
+                if (response is RelayResponse.Event && arrivals.incrementAndGet() > window.pageSize) overflow.set(true)
+                if (!overflow.get() && !q.offer(response)) overflow.set(true)
+            })
+            try {
+                val subscription = "catchup-$page"
+                c.subscribe(subscription, listOf(buildJsonObject {
+                    put("kinds", JsonArray(listOf(JsonPrimitive(1059))))
+                    put("#p", JsonArray(listOf(JsonPrimitive(local))))
+                    put("since", window.since); put("until", until); put("limit", window.pageSize)
+                }))
+                c.connect()
+                val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+                var count = 0
+                var oldest = until
+                val outerIds = hashSetOf<String>()
+                while (true) {
+                    checkActive()
+                    if (overflow.get()) return false
+                    val remaining = deadline - System.nanoTime()
+                    if (remaining <= 0) return false
+                    when (val response = q.poll(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(100)), TimeUnit.NANOSECONDS)) {
+                        is RelayResponse.Event -> {
+                            val event = response.event
+                            val outer = event.unsignedEvent
+                            // Ignore relays that return events outside the requested filter. Still
+                            // count them against the budget, so hostile responses cannot extend a run.
+                            count++
+                            if (outer.createdAtSeconds !in window.since..until || outer.kind != 1059 ||
+                                outer.tags.none { it.size >= 2 && it[0] == "p" && it[1] == local }) continue
+                            if (!outerIds.add(event.id)) continue
+                            val rumor = try { identity.withExistingSecret { nip17.decodeIncoming(event, it) } }
+                                catch (_: IllegalArgumentException) { continue }
+                            // Only authenticated wraps may move the paging boundary.
+                            oldest = minOf(oldest, outer.createdAtSeconds)
+                            val id = NostrEventCodec.calculateId(rumor)
+                            checkActive()
+                            if (decoded.add(id)) stored(rumor)
+                        }
+                        is RelayResponse.EndOfStoredEvents -> {
+                            if (overflow.get()) return false
+                            if (count < window.pageSize) return true
+                            // Inclusive until retains timestamp ties. If one second saturates the
+                            // page, NIP-01 has no ID cursor: stop incomplete instead of skipping it.
+                            if (oldest >= until) return false
+                            until = oldest
+                            break
+                        }
+                        is RelayResponse.Closed, is RelayResponse.AuthenticationRequired -> return false
+                        else -> Unit
+                    }
+                }
+            } finally { release(c) }
+        }
+        return false
+    }
+
     override fun close() {
         synchronized(callbackGate) { closed = true }
         val (tasks, sockets) = synchronized(lifecycle) { work.toList() to clients.toList() }

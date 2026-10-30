@@ -41,6 +41,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -170,6 +171,7 @@ internal fun RelayChatScreen(
     togglePinMessage: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
+    var attachmentRequest by rememberSaveable(info.route) { mutableIntStateOf(0) }
     // Draft stays in memory only (saved state is not encrypted storage).
     var draft by remember(info.route) { mutableStateOf("") }
     val retried = remember(info.route) { mutableStateListOf<String>() }
@@ -321,13 +323,21 @@ internal fun RelayChatScreen(
             }
         }
 
+        if (info.nearby && info.target != null) NearbyAttachments(info.target, mesh, attachmentRequest)
+
         Composer(
             draft = draft,
             onDraft = { draft = it },
             canSend = canSend,
             sendDescription = if (info.nearby) "Send message" else "Send encrypted message",
             onSend = send,
-            onPlus = { toast("Sending photos is coming soon") }
+            onPlus = {
+                when {
+                    info.nearby && info.target != null -> attachmentRequest++
+                    info.nearby -> toast("Choose a private Nearby chat to share a file. Group attachments are unavailable.")
+                    else -> toast("Internet attachments are not available yet.")
+                }
+            }
         )
     }
 }

@@ -28,6 +28,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -42,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
@@ -241,7 +244,8 @@ internal fun RelayChatsScreen(
     togglePin: (String) -> Unit = {},
     deleteChat: (String) -> Unit = {},
     refreshing: Boolean = false,
-    onRefresh: () -> Unit = {}
+    onRefresh: () -> Unit = {},
+    toggleFavorite: (String) -> Unit = {}
 ) {
     // Search text can contain private names, so it is kept in memory only.
     var search by remember { mutableStateOf("") }
@@ -287,10 +291,11 @@ internal fun RelayChatsScreen(
             )
         }
     ) {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+        // Leave room for the 56dp FAB and its margins when the last chat is scrolled into view.
+        LazyColumn(Modifier.fillMaxSize().testTag("relay-chat-list"), contentPadding = PaddingValues(bottom = 88.dp)) {
             item { RelayHeader("Relay", myName, onAvatar) }
             item { RelaySearchField(search, { search = it }, "Find your friends") }
-            item { FilterChipsRow(filter, { filter = it }, newChat) }
+            item { FilterChipsRow(filter, { filter = it }) }
             if (visible.isEmpty()) {
                 item {
                     Box(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
@@ -312,7 +317,9 @@ internal fun RelayChatsScreen(
                 val route = item.info.route
                 val isPinned = route in pinned
                 Box {
-                    ChatListRow(item, now, isPinned, onClick = { openChat(route) }, onLongClick = { menuRoute = route })
+                    ChatListRow(item, now, isPinned, route in favorites,
+                        toggleFavorite = { toggleFavorite(route) },
+                        onClick = { openChat(route) }, onLongClick = { menuRoute = route })
                     DropdownMenu(expanded = menuRoute == route, onDismissRequest = { menuRoute = null }) {
                         DropdownMenuItem(
                             text = { Text(if (isPinned) "Unpin chat" else "Pin chat") },
@@ -325,6 +332,16 @@ internal fun RelayChatsScreen(
                     }
                 }
             }
+        }
+        // The host Scaffold already reserves the bottom navigation bar and its system insets.
+        FloatingActionButton(
+            onClick = newChat,
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp).size(56.dp),
+            shape = CircleShape,
+            containerColor = RelayColors.Blue,
+            contentColor = Color.White
+        ) {
+            RIcon(R.drawable.relay_plus, "New Chat", tint = Color.White, size = 24.dp)
         }
     }
 }
@@ -358,7 +375,7 @@ internal fun RelaySearchField(value: String, onChange: (String) -> Unit, placeho
 }
 
 @Composable
-private fun FilterChipsRow(selected: String, onSelect: (String) -> Unit, onPlus: () -> Unit) {
+private fun FilterChipsRow(selected: String, onSelect: (String) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -380,22 +397,13 @@ private fun FilterChipsRow(selected: String, onSelect: (String) -> Unit, onPlus:
                 Text(name, color = if (isOn) Color.White else RelayColors.TextPrimary, fontSize = 13.sp)
             }
         }
-        Box(
-            modifier = Modifier
-                .size(32.dp)
-                .clip(CircleShape)
-                .border(1.dp, RelayColors.Divider, CircleShape)
-                .clickable(onClick = onPlus),
-            contentAlignment = Alignment.Center
-        ) {
-            RIcon(R.drawable.relay_plus, "New Chat", tint = RelayColors.TextPrimary, size = 18.dp)
-        }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite: Boolean,
+                        toggleFavorite: () -> Unit, onClick: () -> Unit, onLongClick: () -> Unit) {
     val info = item.info
     Row(
         modifier = Modifier
@@ -435,6 +443,18 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, onClick:
                 fontSize = 14.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
+            )
+        }
+        IconToggleButton(
+            checked = favorite,
+            onCheckedChange = { toggleFavorite() },
+            modifier = Modifier.size(48.dp)
+        ) {
+            RIcon(
+                if (favorite) R.drawable.relay_star_filled else R.drawable.relay_star,
+                if (favorite) "Remove ${info.title} from favorites" else "Add ${info.title} to favorites",
+                tint = if (favorite) RelayColors.Orange else RelayColors.TextSecondary,
+                size = 22.dp
             )
         }
     }

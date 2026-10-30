@@ -33,6 +33,47 @@ class InternetHistoryStorageTest {
         file.parentFile?.deleteRecursively()
         Unit
     }
+    @Test fun backgroundCatchUpPreservesTombstonesAndSenderStatusAcrossRestart() = runBlocking(Dispatchers.IO) {
+        val rumorEvent = `in`.yashd.bitchat.nostr.UnsignedNostrEvent(peer, 1000, 14,
+            listOf(listOf("p", owner)), "deleted plaintext")
+        val id = `in`.yashd.bitchat.nostr.NostrEventCodec.calculateId(rumorEvent)
+        var repository = repo()
+        repository.received(owner, id, peer, rumorEvent.content, false, 1_000_000)
+        repository.deleteConversation(owner, peer)
+        repository.close()
+        repository = repo()
+        val backend = object : `in`.yashd.bitchat.ui.relay.InternetBackend {
+            override fun identity() = `in`.yashd.bitchat.nostr.NostrIdentity(owner,
+                `in`.yashd.bitchat.nostr.NostrNpub.encode(ByteArray(32) { 1 }))
+            override fun open(discovery: List<String>, received: (`in`.yashd.bitchat.nostr.UnsignedNostrEvent) -> Unit,
+                connection: (String, String) -> Unit, issue: (String) -> Unit): `in`.yashd.bitchat.ui.relay.InternetSession = error("No live session")
+            override fun close() {}
+        }
+        var alerts = 0
+        val runtime = `in`.yashd.bitchat.ui.relay.InternetRuntime(backend, Dispatchers.IO, repository,
+            onIncomingStored = { _, _, _ -> alerts++ })
+        try {
+            assertEquals(true, runtime.backgroundCatchUp(owner) { stored ->
+                repeat(3) { stored(rumorEvent) }
+                true
+            })
+            assertTrue(repository.load(owner).messages.isEmpty())
+            assertTrue(repository.load(owner).contacts.isEmpty())
+            val outgoing = rumorEvent.copy(pubkey = owner, tags = listOf(listOf("p", peer)), content = "sender copy")
+            val outgoingId = `in`.yashd.bitchat.nostr.NostrEventCodec.calculateId(outgoing)
+            repository.outgoing(owner, "sent", peer, outgoing.content, 1_000_000)
+            repository.bindRumor(owner, "sent", outgoingId)
+            repository.publication(owner, "sent", accepted())
+            assertEquals(true, runtime.backgroundCatchUp(owner) { stored -> repeat(3) { stored(outgoing) }; true })
+            assertEquals(1, repository.load(owner).messages.size)
+            assertEquals(HistoryStatus.RELAY_ACCEPTED, repository.load(owner).messages.single().status)
+            assertEquals(0, alerts)
+        } finally { runtime.close(); repository.close() }
+        val snapshot = repo().load(owner)
+        assertEquals(1, snapshot.messages.size)
+        assertEquals(HistoryStatus.RELAY_ACCEPTED, snapshot.messages.single().status)
+    }
+
     @Test fun contactsAndBodiesSurviveRepositoryAndDatabaseReopen() = runBlocking(Dispatchers.IO) {
         val first = repo()
         first.contact(owner, peer, "Aarav")

@@ -24,7 +24,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
-import java.util.LinkedList
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 
 data class TransportPacket(
@@ -52,8 +52,8 @@ class BleTransport(
     private val subscribedServerClients = linkedMapOf<String, BluetoothDevice>()
     private val negotiatedMtus = mutableMapOf<String, Int>()
     private val serverMtus = mutableMapOf<String, Int>()
-    private val writeQueue = LinkedList<Pair<String, ByteArray>>()
-    private val notificationQueue = LinkedList<Pair<BluetoothDevice, ByteArray>>()
+    private val writeQueue = PriorityFrameQueue<String>()
+    private val notificationQueue = PriorityFrameQueue<BluetoothDevice>()
     private val nextMessageId = AtomicInteger()
     private val reassembler = BleFrameCodec.Reassembler()
     private val write = PendingBleOperation<BluetoothGatt>(
@@ -268,29 +268,28 @@ class BleTransport(
         reassembler.clear()
     }
 
-    fun send(bytes: ByteArray): Boolean {
+    fun send(bytes: ByteArray, fileTransferId: UUID? = null, targetLinks: Set<String>? = null): Boolean {
         check(Looper.myLooper() == Looper.getMainLooper())
         if (!running) return false
         var queued = false
         readyClients.forEach { address ->
+            if (targetLinks != null && address !in targetLinks) return@forEach
             val frames = BleFrameCodec.encode(bytes, valueSize(address), nextMessageId.incrementAndGet())
-            if (writeQueue.size + frames.size > MAX_QUEUED_FRAMES) return@forEach
-            frames.forEach {
-                writeQueue.add(address to it)
-            }
-            queued = true
+            if (writeQueue.offer(address, frames, fileTransferId)) queued = true
         }
         subscribedServerClients.values.forEach { device ->
+            if (targetLinks != null && device.address !in targetLinks) return@forEach
             val frames = BleFrameCodec.encode(bytes, (serverMtus[device.address] ?: 23) - 3, nextMessageId.incrementAndGet())
-            if (notificationQueue.size + frames.size > MAX_QUEUED_FRAMES) return@forEach
-            frames.forEach {
-                notificationQueue.add(device to it)
-            }
-            queued = true
+            if (notificationQueue.offer(device, frames, fileTransferId)) queued = true
         }
         drainWrites()
         drainNotifications()
         return queued
+    }
+
+    fun cancelQueuedFile(id: UUID) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        writeQueue.removeTransfer(id); notificationQueue.removeTransfer(id)
     }
 
     private fun startGattServer() {
@@ -342,8 +341,9 @@ class BleTransport(
 
     private fun drainWrites() {
         if (write.owner != null) return
-        while (writeQueue.isNotEmpty()) {
-            val (address, bytes) = writeQueue.removeFirst()
+        while (true) {
+            val frame = writeQueue.poll() ?: return
+            val address = frame.target; val bytes = frame.bytes
             val gatt = connectedGatts[address] ?: continue
             val characteristic = gatt.getService(BleUuids.SERVICE_UUID)
                 ?.getCharacteristic(BleUuids.PACKET_CHARACTERISTIC_UUID) ?: continue
@@ -361,8 +361,9 @@ class BleTransport(
 
     private fun drainNotifications() {
         if (notification.owner != null) return
-        while (notificationQueue.isNotEmpty()) {
-            val (device, bytes) = notificationQueue.removeFirst()
+        while (true) {
+            val frame = notificationQueue.poll() ?: return
+            val device = frame.target; val bytes = frame.bytes
             if (device.address !in subscribedServerClients) continue
             val server = gattServer ?: return
             val characteristic = packetCharacteristic ?: return
@@ -383,7 +384,7 @@ class BleTransport(
         connectedGatts.remove(address)
         readyClients.remove(address)
         negotiatedMtus.remove(address)
-        writeQueue.removeAll { it.first == address }
+        writeQueue.removeTarget { it == address }
         write.finish(gatt)
         runCatching { gatt.disconnect(); gatt.close() }
         linkLost(address)
@@ -394,7 +395,7 @@ class BleTransport(
         val address = device.address
         subscribedServerClients.remove(address)
         serverMtus.remove(address)
-        notificationQueue.removeAll { it.first.address == address }
+        notificationQueue.removeTarget { it.address == address }
         notification.finish(device)
         linkLost(address)
         drainNotifications()
@@ -434,6 +435,5 @@ class BleTransport(
 
     private companion object {
         const val OPERATION_TIMEOUT_MS = 15_000L
-        const val MAX_QUEUED_FRAMES = 4096
     }
 }

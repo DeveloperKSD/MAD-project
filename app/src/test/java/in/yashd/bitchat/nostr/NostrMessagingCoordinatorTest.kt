@@ -477,4 +477,90 @@ class NostrMessagingCoordinatorTest {
         }
     }
 
+    private fun boundedWrap(body: String, time: Long, outerTime: Long, outgoing: Boolean = false): NostrEvent {
+        val sender = if (outgoing) alice else bob
+        val recipient = if (outgoing) pub(bob) else pub(alice)
+        val rumor = UnsignedNostrEvent(pub(sender), time, 14, listOf(listOf("p", recipient)), body)
+        val seal = NostrEventSigner().createSignedEvent(sender, 13,
+            Nip44().encrypt(NostrEventCodec.encodeRumor(rumor), sender, pub(alice).hexBytes()), createdAtSeconds = outerTime)
+        val temporary = ByteArray(32).apply { this[31] = 3 }
+        return NostrEventSigner().createSignedEvent(temporary, 1059,
+            Nip44().encrypt(NostrEventCodec.encode(seal), temporary, pub(alice).hexBytes()),
+            listOf(listOf("p", pub(alice))), outerTime)
+    }
+    @Test fun finiteCatchUpPagesToEoseDeduplicatesInnerRumorAndIsSilent() = Network().use { n ->
+        val events = (1..5).map { boundedWrap("message-$it", 1000L + it, 900L + it) } +
+            boundedWrap("message-5", 1005, 906) + boundedWrap("sender copy", 1006, 907, true)
+        val requests = mutableListOf<JsonObject>()
+        val url = n.relay { ws, text -> val f = fields(text)
+            if (f[0].jsonPrimitive.content == "REQ") {
+                val filter = f[2].jsonObject
+                synchronized(requests) { requests.add(filter) }
+                val since = filter.getValue("since").jsonPrimitive.long
+                val until = filter.getValue("until").jsonPrimitive.long
+                val limit = filter.getValue("limit").jsonPrimitive.int
+                events.filter { it.unsignedEvent.createdAtSeconds in since..until }
+                    .sortedByDescending { it.unsignedEvent.createdAtSeconds }.take(limit).forEach {
+                        ws.send("[\"EVENT\",${f[1]},${NostrEventCodec.encode(it)}]")
+                    }
+                ws.send("[\"EOSE\",${f[1]}]")
+            }
+        }
+        var liveAlerts = 0
+        val stored = mutableListOf<UnsignedNostrEvent>()
+        NostrMessagingCoordinator(manager(), n.http, listOf(url), onReceived = { liveAlerts++ }).use { c ->
+            assertTrue(c.catchUp(listOf(url), InboxReplayWindow(800, 1100, 3, 12)) { stored.add(it) }.get(10, TimeUnit.SECONDS))
+            assertEquals(6, stored.size)
+            assertEquals(1, stored.count { it.pubkey == pub(alice) })
+            assertEquals(0, liveAlerts)
+            assertTrue(requests.size in 2..12)
+            assertTrue(requests.all { it.getValue("limit").jsonPrimitive.int == 3 })
+        }
+    }
+    @Test fun saturatedTimestampBoundaryAndPageBudgetRemainIncomplete() = Network().use { n ->
+        val events = listOf(boundedWrap("one", 1000, 900), boundedWrap("two", 1001, 900))
+        val requests = AtomicInteger()
+        val url = n.relay { ws, text -> val f = fields(text)
+            if (f[0].jsonPrimitive.content == "REQ") {
+                requests.incrementAndGet()
+                events.forEach { ws.send("[\"EVENT\",${f[1]},${NostrEventCodec.encode(it)}]") }
+                ws.send("[\"EOSE\",${f[1]}]")
+            }
+        }
+        NostrMessagingCoordinator(manager(), n.http, listOf(url)).use { c ->
+            assertFalse(c.catchUp(listOf(url), InboxReplayWindow(800, 1100, 2, 12)) {}.get(10, TimeUnit.SECONDS))
+            assertEquals(2, requests.get())
+            assertFalse(c.catchUp(listOf(url), InboxReplayWindow(800, 1100, 2, 1)) {}.get(10, TimeUnit.SECONDS))
+            assertEquals(3, requests.get())
+        }
+    }
+    @Test fun missingEoseTimeoutAndCancellationAreFinite() = Network().use { n ->
+        val requested = CountDownLatch(1)
+        val url = n.relay { _, text -> if (fields(text)[0].jsonPrimitive.content == "REQ") requested.countDown() }
+        NostrMessagingCoordinator(manager(), n.http, listOf(url), timeoutMillis = 200).use { c ->
+            assertFalse(c.catchUp(listOf(url), InboxReplayWindow(0, 1100)) {}.get(5, TimeUnit.SECONDS))
+        }
+        NostrMessagingCoordinator(manager(), n.http, listOf(url), timeoutMillis = 60_000).use { c ->
+            val future = c.catchUp(listOf(url), InboxReplayWindow(0, 1100)) {}
+            assertTrue(requested.await(5, TimeUnit.SECONDS))
+            assertTrue(future.cancel(true))
+            assertTrue(future.isCancelled)
+        }
+    }
+    @Test fun boundedCatchUpPropagatesStorageFailureInsteadOfReportingSuccess() = Network().use { n ->
+        val event = boundedWrap("not saved", 1000, 900)
+        val url = n.relay { ws, text -> val f = fields(text)
+            if (f[0].jsonPrimitive.content == "REQ") {
+                ws.send("[\"EVENT\",${f[1]},${NostrEventCodec.encode(event)}]")
+                ws.send("[\"EOSE\",${f[1]}]")
+            }
+        }
+        NostrMessagingCoordinator(manager(), n.http, listOf(url)).use { c ->
+            try {
+                c.catchUp(listOf(url), InboxReplayWindow(800, 1100)) { error("Storage unavailable") }.get(5, TimeUnit.SECONDS)
+                fail("A storage failure must propagate")
+            } catch (e: ExecutionException) { assertTrue(e.cause is IllegalStateException) }
+        }
+    }
+
 }
