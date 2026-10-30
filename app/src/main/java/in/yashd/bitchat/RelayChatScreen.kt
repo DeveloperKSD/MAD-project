@@ -573,40 +573,77 @@ private fun BubbleBody(b: BubbleUi, pinned: Boolean) {
         val belowGapPx = 2.dp.roundToPx()
         val result = if (b.body.isBlank()) null
             else measurer.measure(AnnotatedString(b.body), style = bodyStyle, constraints = constraints)
-        if (result == null || result.lineCount == 0) {
-            // Nothing to align against: stack the meta under the text, right-aligned.
-            val text = measurables[0].measure(Constraints(maxWidth = constraints.maxWidth))
-            val width = maxOf(text.width, meta.width).coerceIn(constraints.minWidth, constraints.maxWidth)
-            val height = text.height + belowGapPx + meta.height
-            layout(width, height) {
-                text.place(0, 0)
-                meta.place((width - meta.width).coerceAtLeast(0), text.height + belowGapPx)
-            }
-        } else {
-            val lastLine = result.lineCount - 1
-            val lineRight = result.getLineRight(lastLine)
-            val lineTop = result.getLineTop(lastLine)
-            val lineBottom = result.getLineBottom(lastLine)
-            val inlineFits = lineRight + gapPx + meta.width <= constraints.maxWidth
-            val width = maxOf(
-                result.size.width,
-                if (inlineFits) (lineRight + gapPx + meta.width).toInt() else meta.width
-            ).coerceIn(constraints.minWidth, constraints.maxWidth)
-            val rawHeight = if (inlineFits) result.size.height else result.size.height + belowGapPx + meta.height
-            val height = if (constraints.hasBoundedHeight) rawHeight.coerceAtMost(constraints.maxHeight) else rawHeight
-            val text = measurables[0].measure(Constraints.fixedWidth(result.size.width.coerceAtMost(constraints.maxWidth)))
-            layout(width, height) {
-                text.place(0, 0)
-                val maxY = (height - meta.height).coerceAtLeast(0)
-                if (inlineFits) {
-                    val y = (lineTop + (lineBottom - lineTop - meta.height) / 2f).toInt().coerceIn(0, maxY)
-                    meta.place((width - meta.width).coerceAtLeast(0), y)
-                } else {
-                    meta.place((width - meta.width).coerceAtLeast(0), (result.size.height + belowGapPx).coerceIn(0, maxY))
-                }
-            }
+        val lastLine = (result?.lineCount ?: 0) - 1
+        val plan = planBubbleLayout(
+            lineCount = result?.lineCount ?: 0,
+            textBlockWidth = result?.size?.width ?: 0,
+            textBlockHeight = result?.size?.height ?: 0,
+            lastLineRight = if (lastLine >= 0) result!!.getLineRight(lastLine) else 0f,
+            lastLineTop = if (lastLine >= 0) result!!.getLineTop(lastLine) else 0f,
+            lastLineBottom = if (lastLine >= 0) result!!.getLineBottom(lastLine) else 0f,
+            metaWidth = meta.width,
+            metaHeight = meta.height,
+            minWidth = constraints.minWidth,
+            maxWidth = constraints.maxWidth,
+            maxHeight = if (constraints.hasBoundedHeight) constraints.maxHeight else Int.MAX_VALUE,
+            gapPx = gapPx,
+            belowGapPx = belowGapPx
+        )
+        val text = measurables[0].measure(Constraints.fixedWidth(plan.textWidth))
+        layout(plan.width, plan.height) {
+            text.place(0, 0)
+            meta.place(plan.metaX, plan.metaY)
         }
     }
+}
+
+/** Where the bubble's text block and time/ticks row land. Pure so it is JVM-testable. */
+internal data class BubbleLayoutPlan(
+    val width: Int,
+    val height: Int,
+    val textWidth: Int,
+    val metaX: Int,
+    val metaY: Int,
+    val inline: Boolean
+)
+
+internal fun planBubbleLayout(
+    lineCount: Int,
+    textBlockWidth: Int,
+    textBlockHeight: Int,
+    lastLineRight: Float,
+    lastLineTop: Float,
+    lastLineBottom: Float,
+    metaWidth: Int,
+    metaHeight: Int,
+    minWidth: Int,
+    maxWidth: Int,
+    maxHeight: Int,
+    gapPx: Int,
+    belowGapPx: Int
+): BubbleLayoutPlan {
+    val textWidth = textBlockWidth.coerceAtMost(maxWidth)
+    if (lineCount == 0) {
+        // Nothing to align against: stack the meta under the text, right-aligned.
+        val width = maxOf(textWidth, metaWidth).coerceIn(minWidth, maxWidth)
+        val height = (textBlockHeight + belowGapPx + metaHeight).coerceAtMost(maxHeight)
+        return BubbleLayoutPlan(width, height, textWidth,
+            metaX = (width - metaWidth).coerceAtLeast(0),
+            metaY = (textBlockHeight + belowGapPx).coerceIn(0, (height - metaHeight).coerceAtLeast(0)),
+            inline = false)
+    }
+    val inline = lastLineRight + gapPx + metaWidth <= maxWidth
+    val width = maxOf(
+        textWidth,
+        if (inline) (lastLineRight + gapPx + metaWidth).toInt() else metaWidth
+    ).coerceIn(minWidth, maxWidth)
+    val height = (if (inline) textBlockHeight else textBlockHeight + belowGapPx + metaHeight).coerceAtMost(maxHeight)
+    val maxY = (height - metaHeight).coerceAtLeast(0)
+    val metaY = if (inline)
+        (lastLineTop + (lastLineBottom - lastLineTop - metaHeight) / 2f).toInt().coerceIn(0, maxY)
+    else
+        (textBlockHeight + belowGapPx).coerceIn(0, maxY)
+    return BubbleLayoutPlan(width, height, textWidth, (width - metaWidth).coerceAtLeast(0), metaY, inline)
 }
 
 @Composable
