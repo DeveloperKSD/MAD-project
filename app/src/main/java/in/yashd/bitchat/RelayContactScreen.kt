@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,11 +24,18 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.ViewModelProvider
+import `in`.yashd.bitchat.attachments.NearbyAttachmentModel
+import `in`.yashd.bitchat.mesh.MeshRuntime
+import `in`.yashd.bitchat.transfer.ble.BleFilePhase
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
@@ -208,26 +216,54 @@ internal fun RelayContactScreen(
 
             Spacer(Modifier.height(12.dp))
             SectionTitle("Shared media")
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                repeat(3) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .aspectRatio(1f)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(RelayColors.Card),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        RIcon(R.drawable.relay_image, null, tint = RelayColors.TextMuted, size = 26.dp)
+            if (info.nearby && info.target != null) {
+                val attachmentModel = remember(context) { ViewModelProvider(context.activity())[NearbyAttachmentModel::class.java] }
+                val attachmentUi by attachmentModel.state.collectAsState()
+                val allTransfers by MeshRuntime.fileTransfers.collectAsState()
+                val media = allTransfers.filter { it.peer == info.target && !it.outgoing && it.phase == BleFilePhase.COMPLETED }
+                var viewerStart by remember { mutableStateOf(-1) }
+                LaunchedEffect(media.map { it.id }) {
+                    media.filter { attachmentUi.previews[it.id] == null }.forEach { attachmentModel.quietPreview(it) }
+                }
+                val images = media.filter { attachmentUi.previews[it.id]?.bitmap != null }
+                if (images.isEmpty()) {
+                    Text(
+                        "Verified photos you receive will show up here.",
+                        modifier = Modifier.padding(top = 4.dp, start = 4.dp),
+                        color = RelayColors.TextMuted,
+                        fontSize = 12.sp
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        images.chunked(3).forEach { rowItems ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                rowItems.forEach { file ->
+                                    androidx.compose.foundation.Image(
+                                        attachmentUi.previews.getValue(file.id).bitmap!!.asImageBitmap(),
+                                        "Verified received image",
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .clickable { viewerStart = media.indexOf(file) }
+                                    )
+                                }
+                                repeat(3 - rowItems.size) { Spacer(Modifier.weight(1f)) }
+                            }
+                        }
                     }
                 }
+                if (viewerStart >= 0) {
+                    AttachmentPagerViewer(media, attachmentUi.previews, viewerStart, attachmentModel::quietPreview) { viewerStart = -1 }
+                }
+            } else {
+                Text(
+                    "Internet attachments are not available yet.",
+                    modifier = Modifier.padding(top = 4.dp, start = 4.dp),
+                    color = RelayColors.TextMuted,
+                    fontSize = 12.sp
+                )
             }
-            Text(
-                "Photos you share will show up here.",
-                modifier = Modifier.padding(top = 8.dp, start = 4.dp),
-                color = RelayColors.TextMuted,
-                fontSize = 12.sp
-            )
 
             Spacer(Modifier.height(16.dp))
             RelayCard {

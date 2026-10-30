@@ -106,6 +106,26 @@ internal class NearbyAttachmentModel(application: Application) : AndroidViewMode
             BleFileAction.DISCARD -> "Attachment removed from this device."
         })
     }
+    /** Quiet gallery thumbnail loading: no busy flag, errors are silent (detail preview still reports them). */
+    fun quietPreview(status: BleFileStatus) {
+        if (mutable.value.busy || mutable.value.previews.containsKey(status.id)) return
+        if (status.outgoing || status.phase != BleFilePhase.COMPLETED) return
+        viewModelScope.launch {
+            runCatching {
+                val verified = withContext(Dispatchers.IO) {
+                    AttachmentPolicy.checkSpace(privateFiles.directory.usableSpace, status.totalBytes)
+                    val file = privateFiles.temporary()
+                    try {
+                        file.outputStream().use { MeshRuntime.copyVerifiedAttachment(status.id, it).getOrThrow() }
+                        val kind = privateFiles.validate(file)
+                        VerifiedAttachment(file, kind, if (kind == AttachmentKind.PDF) null else privateFiles.preview(file))
+                    } catch (e: Exception) { file.delete(); throw e }
+                }
+                mutable.value.previews[status.id]?.file?.delete()
+                mutable.value = mutable.value.copy(previews = mutable.value.previews + (status.id to verified))
+            }
+        }
+    }
     fun preview(status: BleFileStatus) = operation {
         require(!status.outgoing && status.phase == BleFilePhase.COMPLETED)
         val verified = withContext(Dispatchers.IO) {

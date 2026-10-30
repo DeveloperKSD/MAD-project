@@ -17,6 +17,8 @@ import androidx.compose.material3.*
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -35,7 +37,7 @@ import `in`.yashd.bitchat.transfer.TransferProfile
 import `in`.yashd.bitchat.transfer.ble.*
 import java.util.UUID
 
-private fun Context.activity(): ComponentActivity = when (this) {
+internal fun Context.activity(): ComponentActivity = when (this) {
     is ComponentActivity -> this
     is ContextWrapper -> baseContext.activity()
     else -> error("Attachment picker requires an activity")
@@ -76,6 +78,9 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
         if (mesh.localPeerId.isNotEmpty()) MeshRuntime.reloadFileTransfers().onFailure { loadError = "Saved attachments are unavailable. Existing files were preserved." }
     }
     LaunchedEffect(pickerRequest) { if (pickerRequest > handledRequest) { handledRequest = pickerRequest; picker = true } }
+    LaunchedEffect(files.map { it.id to it.phase }) {
+        files.filter { !it.outgoing && it.phase == BleFilePhase.COMPLETED && ui.previews[it.id] == null }.forEach { model.quietPreview(it) }
+    }
 
     // Picker: a sheet matching the New Chat sheet, not a dialog.
     if (picker) ModalBottomSheet(onDismissRequest = { picker = false }, containerColor = RelayColors.Card) {
@@ -121,27 +126,11 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
         }
     }
 
-    // Full-screen viewer with left/right navigation across verified received images.
+    // Full-screen viewer with left/right swipe across verified received images.
     if (viewerIndex >= 0) {
         val viewable = files.filter { it.phase == BleFilePhase.COMPLETED && !it.outgoing }
-        val current = viewable.getOrNull(viewerIndex)
-        if (current == null) viewerIndex = -1 else Dialog(onDismissRequest = { viewerIndex = -1 },
-            properties = DialogProperties(usePlatformDefaultWidth = false)) {
-            Box(Modifier.fillMaxSize().background(Color.Black)) {
-                val verified = ui.previews[current.id]
-                if (verified?.bitmap != null) {
-                    Image(verified.bitmap.asImageBitmap(), "Verified received image",
-                        Modifier.fillMaxSize().clickable { viewerIndex = -1 })
-                } else {
-                    LaunchedEffect(current.id) { if (verified == null) model.preview(current) }
-                    CircularProgressIndicator(Modifier.align(Alignment.Center))
-                }
-                if (viewerIndex > 0) Text("<", color = Color.White, fontSize = 28.sp,
-                    modifier = Modifier.align(Alignment.CenterStart).clickable { viewerIndex-- }.padding(20.dp))
-                if (viewerIndex < viewable.lastIndex) Text(">", color = Color.White, fontSize = 28.sp,
-                    modifier = Modifier.align(Alignment.CenterEnd).clickable { viewerIndex++ }.padding(20.dp))
-            }
-        }
+        if (viewable.isEmpty()) viewerIndex = -1
+        else AttachmentPagerViewer(viewable, ui.previews, viewerIndex, model::quietPreview) { viewerIndex = -1 }
     }
 
     detailId?.let { id ->
@@ -277,4 +266,32 @@ internal fun NearbyAttachmentConfirmation(draft: PickedAttachment, recipient: St
         }
     }, confirmButton = { TextButton(enabled = connected && !busy, onClick = send) { Text(if (busy) "Preparing…" else "Send offer") } },
         dismissButton = { TextButton(enabled = !busy, onClick = dismiss) { Text("Cancel selection") } })
+}
+
+/** Full-screen swipeable viewer for verified received attachments (images render, PDFs note honestly). */
+@Composable
+internal fun AttachmentPagerViewer(viewable: List<BleFileStatus>, previews: Map<UUID, VerifiedAttachment>,
+    startIndex: Int, onLoadPreview: (BleFileStatus) -> Unit, onDismiss: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val pager = rememberPagerState(initialPage = startIndex.coerceIn(0, viewable.lastIndex)) { viewable.size }
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
+                val file = viewable[page]
+                val verified = previews[file.id]
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    when {
+                        verified?.bitmap != null -> Image(verified.bitmap.asImageBitmap(), "Verified received image",
+                            Modifier.fillMaxSize().clickable(onClick = onDismiss))
+                        verified?.kind == AttachmentKind.PDF -> Text("PDF document. Open the saved file with a trusted viewer.", color = Color.White)
+                        else -> {
+                            LaunchedEffect(file.id) { onLoadPreview(file) }
+                            CircularProgressIndicator()
+                        }
+                    }
+                }
+            }
+            Text("${pager.currentPage + 1} / ${viewable.size}", color = Color.White, fontSize = RelayType.Meta,
+                modifier = Modifier.align(Alignment.TopCenter).padding(24.dp))
+        }
+    }
 }
