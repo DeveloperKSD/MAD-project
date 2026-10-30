@@ -166,6 +166,8 @@ internal fun RelayUsernameScreen(onContinue: (String) -> Unit) {
             Modifier.align(Alignment.Center).padding(horizontal = 47.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            PersonAvatar(name.ifBlank { "?" }, 96.dp)
+            Spacer(Modifier.height(28.dp))
             Text(
                 "What should friends call you?",
                 color = Color.White, fontSize = 31.sp, fontWeight = FontWeight.Bold,
