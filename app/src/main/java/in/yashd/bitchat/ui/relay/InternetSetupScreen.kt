@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -11,6 +12,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -26,6 +28,11 @@ fun InternetSetupScreen(state: RelayUiState, updateServers: (String, String) -> 
     finish: () -> Unit, exit: () -> Unit) {
     val setup = state.setup
     var advanced by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (setup.discoveryDraft.isBlank() && setup.inboxDraft.isBlank()) {
+            updateServers(DEFAULT_DISCOVERY_RELAYS.joinToString("\n"), DEFAULT_INBOX_RELAYS.joinToString("\n"))
+        }
+    }
     LazyColumn(Modifier.fillMaxSize().testTag("internet-setup-list"), contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
@@ -37,6 +44,7 @@ fun InternetSetupScreen(state: RelayUiState, updateServers: (String, String) -> 
         when (setup.step) {
             0 -> {
                 item { Text("Servers pass encrypted messages between friends. Discovery servers help find your inbox; inbox servers receive your encrypted messages. You choose which operators to use.") }
+                item { Text("Recommended public servers are filled in already, so you can just continue. They are free relays run by others; you can replace them with your own.") }
                 item { Text("Ask a trusted friend or administrator for addresses. Relay does not choose public servers for you.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 item { OutlinedTextField(setup.discoveryDraft,
                     { updateServers(it, setup.inboxDraft) }, Modifier.fillMaxWidth(), enabled = !state.busy && !state.configurationLoading && state.configurationError == null,
@@ -132,6 +140,7 @@ fun PublicRelayId(npub: String) {
     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Your public Relay ID", color = RelayColors.TextPrimary, fontSize = RelayType.Body, fontWeight = FontWeight.SemiBold)
+            if (npub.isNotEmpty()) QrImage(npub)
             Text(npub.ifEmpty { "Loading your secure identity…" }, style = MaterialTheme.typography.bodySmall)
             Text("Public ID only · safe to share with friends", style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -160,4 +169,26 @@ private fun publicationLabel(stage: NostrMessagingCoordinator.Stage): String = w
     NostrMessagingCoordinator.Stage.FAILED -> "failed"
     NostrMessagingCoordinator.Stage.UNKNOWN -> "outcome unknown"
     else -> "not confirmed"
+}
+
+
+@Composable
+private fun QrImage(contents: String) {
+    val bitmap = remember(contents) {
+        runCatching {
+            val size = 512
+            val matrix = com.google.zxing.qrcode.QRCodeWriter().encode(contents, com.google.zxing.BarcodeFormat.QR_CODE, size, size)
+            android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888).also { bmp ->
+                for (x in 0 until size) for (y in 0 until size) {
+                    bmp.setPixel(x, y, if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+                }
+            }
+        }.getOrNull()
+    }
+    bitmap?.let {
+        Surface(shape = RoundedCornerShape(12.dp), color = androidx.compose.ui.graphics.Color.White) {
+            Image(bitmap = it.asImageBitmap(), contentDescription = "QR code of your public Relay ID",
+                modifier = Modifier.padding(12.dp).fillMaxWidth())
+        }
+    }
 }

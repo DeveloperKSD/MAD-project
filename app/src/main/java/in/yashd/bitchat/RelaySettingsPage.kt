@@ -67,17 +67,12 @@ internal fun RelaySettingsPage(
     val scope = rememberCoroutineScope()
     var changingSync by remember { mutableStateOf(false) }
     var diagnostics by remember { mutableStateOf(false) }
-    var about by remember { mutableStateOf(false) }
     var infoPage by remember { mutableStateOf<String?>(null) }
 
     val pending = internet.messages.count { it.outgoing && it.status == "Sending…" } +
         mesh.currentConversation.count { it.direction == MessageDirection.Outbound && it.status == MessageStatus.Pending }
 
     if (diagnostics) DiagnosticsDialog(mesh, internet) { diagnostics = false }
-    if (about) {
-        val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "unknown"
-        AboutDialog(version) { about = false }
-    }
 
     val page = infoPage
     if (page != null) {
@@ -118,6 +113,16 @@ internal fun RelaySettingsPage(
                     "Files you receive in Nearby chats are saved on this device.")
                 infoSection("App data",
                     "Clearing the app's storage in Android settings removes saved chats and attachments.")
+            }
+            "about" -> SettingsInfoPage("About Relay", { infoPage = null }) {
+                item {
+                    Text("Version " + (runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "unknown"),
+                        color = RelayColors.TextSecondary, fontSize = RelayType.Secondary)
+                }
+                infoSection("Nearby chats",
+                    "Phones nearby find each other over Bluetooth Low Energy. Public messages reach everyone in range, private messages are encrypted, and phones pass messages along so they can hop to people out of direct range.")
+                infoSection("Internet chats",
+                    "Internet chats are end-to-end encrypted and sent through Nostr relays that you choose.")
             }
             "help" -> SettingsInfoPage("Help & FAQ", { infoPage = null }) {
                 infoSection("Why is my message waiting to send?",
@@ -246,7 +251,7 @@ internal fun RelaySettingsPage(
                 RowDivider()
                 RelayListRow(R.drawable.relay_pulse, "Diagnostics", onClick = { diagnostics = true })
                 RowDivider()
-                RelayListRow(R.drawable.relay_info, "About Relay", onClick = { about = true })
+                RelayListRow(R.drawable.relay_info, "About Relay", onClick = { infoPage = "about" })
             }
         }
     }
@@ -310,30 +315,6 @@ private fun DiagnosticsDialog(mesh: MeshUiState, internet: RelayUiState, dismiss
         confirmButton = { TextButton(onClick = dismiss) { Text("Close") } }
     )
 }
-
-@Composable
-private fun AboutDialog(version: String, dismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = dismiss,
-        title = { Text("About Relay") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Version $version", color = RelayColors.TextSecondary, fontSize = 13.sp)
-                Text(
-                    "Phones nearby find each other over Bluetooth Low Energy. Public messages reach everyone in range, " +
-                        "private messages are encrypted, and phones pass messages along so they can hop to people out of direct range.",
-                    fontSize = 13.sp
-                )
-                Text(
-                    "Internet chats are end-to-end encrypted and sent through Nostr relays that you choose.",
-                    fontSize = 13.sp
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = dismiss) { Text("Close") } }
-    )
-}
-
 
 @Composable
 private fun SettingsInfoPage(title: String, back: () -> Unit, content: LazyListScope.() -> Unit) {
