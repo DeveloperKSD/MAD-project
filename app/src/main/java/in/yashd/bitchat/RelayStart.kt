@@ -9,6 +9,9 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -38,12 +41,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
+import android.content.Context
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -84,13 +93,28 @@ private const val TEXTS_TOP = 540f          // top of the area holding each page
 private const val TITLE_CAP_TOP = 675.5f
 private const val SPLASH_MILLIS = 1600L
 
+private const val START_PREFS = "relay_start"
+private const val KEY_ONBOARDED = "onboarding_done"
+private const val KEY_USERNAME = "username"
+
 /**
- * Shows the splash, then the onboarding, then [content] (the app as it was before).
- * The onboarding appears each time the app starts, like the team's original intro.
+ * Shows the blue splash, then - only on the first run - a name step and the onboarding
+ * pages, then [content] (the app as it was before). Later launches go splash -> app.
+ * Installs that already had the app (upgrade, not a fresh install) keep their identity
+ * and never see the onboarding again.
  */
 @Composable
 fun RelayStartFlow(content: @Composable () -> Unit) {
-    // "splash" -> "onboarding" -> "app". Saved, so rotating the phone doesn't start over.
+    val context = LocalContext.current
+    val prefs = remember { context.applicationContext.getSharedPreferences(START_PREFS, Context.MODE_PRIVATE) }
+    val firstRun = remember {
+        val done = prefs.getBoolean(KEY_ONBOARDED, false)
+        val info = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
+        val upgrade = info != null && info.lastUpdateTime != info.firstInstallTime
+        if (!done && upgrade) prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
+        !done && !upgrade
+    }
+    // "splash" -> ("username" -> "onboarding" on first run) -> "app".
     var step by rememberSaveable { mutableStateOf("splash") }
     Crossfade(targetState = step, animationSpec = tween(350), label = "relay-start") { current ->
         when (current) {
@@ -98,11 +122,74 @@ fun RelayStartFlow(content: @Composable () -> Unit) {
                 RelayDesignTheme { RelaySplashScreen() }
                 LaunchedEffect(Unit) {
                     delay(SPLASH_MILLIS)
-                    step = "onboarding"
+                    step = if (firstRun) "username" else "app"
                 }
             }
-            "onboarding" -> RelayDesignTheme { RelayOnboarding(onFinish = { step = "app" }) }
+            "username" -> RelayDesignTheme {
+                RelayUsernameScreen(onContinue = { name ->
+                    prefs.edit().putString(KEY_USERNAME, name).apply()
+                    `in`.yashd.bitchat.mesh.MeshRuntime.renameSelf(name)
+                    step = "onboarding"
+                })
+            }
+            "onboarding" -> RelayDesignTheme {
+                RelayOnboarding(onFinish = {
+                    prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
+                    step = "app"
+                })
+            }
             else -> content()
+        }
+    }
+}
+
+/** First run only, on the blue start screen: the name friends will see for this device. */
+@Composable
+internal fun RelayUsernameScreen(onContinue: (String) -> Unit) {
+    var name by rememberSaveable { mutableStateOf("") }
+    Box(Modifier.fillMaxSize().background(SplashBlue)) {
+        Column(
+            Modifier.align(Alignment.Center).padding(horizontal = 47.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Image(
+                painter = painterResource(R.drawable.relay_logo),
+                contentDescription = "Relay",
+                modifier = Modifier.size(116.dp, 39.dp)
+            )
+            Spacer(Modifier.height(48.dp))
+            Text(
+                "What should friends call you?",
+                color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(20.dp))
+            BasicTextField(
+                value = name,
+                onValueChange = { name = it.take(40) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (name.isNotBlank()) onContinue(name.trim()) }),
+                textStyle = TextStyle(color = Color.Black, fontSize = 16.sp, textAlign = TextAlign.Center),
+                cursorBrush = SolidColor(Color.Black),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.White)
+                    .wrapContentSize(Alignment.Center)
+            )
+            Spacer(Modifier.height(16.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(if (name.isBlank()) Color.White.copy(alpha = 0.35f) else Color.White)
+                    .clickable(enabled = name.isNotBlank(), role = Role.Button) { onContinue(name.trim()) },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Continue", color = Color.Black, fontSize = 16.5.sp, fontWeight = FontWeight.Medium)
+            }
         }
     }
 }
