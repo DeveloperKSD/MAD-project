@@ -14,6 +14,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -50,6 +53,7 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
     var handledRequest by rememberSaveable(peerId) { mutableIntStateOf(0) }
     var destinationId by rememberSaveable { mutableStateOf<String?>(null) }
     var detailId by rememberSaveable(peerId) { mutableStateOf<String?>(null) }
+    var viewerIndex by rememberSaveable(peerId) { mutableStateOf(-1) }
     val peer = mesh.peers.firstOrNull { it.identity.peerId == peerId }
     val connected = mesh.serviceRunning && peer?.state == PeerConnectionState.Authenticated && peer.identity.verified
     val multiHop = peer?.directDeviceAddress == null
@@ -103,11 +107,40 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
     (loadError ?: ui.message)?.let { Text(it, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = RelayColors.TextSecondary) }
 
     // Transcript keeps only a compact summary per transfer; detail/actions live in the sheet.
+    if (files.isNotEmpty()) {
+        Text("Shared media", color = RelayColors.TextSecondary, fontSize = RelayType.Label,
+            modifier = Modifier.padding(start = 16.dp, top = 8.dp))
+        }
     if (files.isNotEmpty()) LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp).testTag("nearby-attachments"),
         contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         items(files, key = { it.id.toString() }) { file ->
             TransferSummaryRow(file, ui.previews[file.id]?.kind, ui.labels[file.id],
-                onOpen = { detailId = file.id.toString() })
+                preview = ui.previews[file.id]?.bitmap,
+                onOpen = { detailId = file.id.toString() },
+                onView = { viewerIndex = files.filter { it.phase == BleFilePhase.COMPLETED && !it.outgoing }.indexOfFirst { it.id == file.id } })
+        }
+    }
+
+    // Full-screen viewer with left/right navigation across verified received images.
+    if (viewerIndex >= 0) {
+        val viewable = files.filter { it.phase == BleFilePhase.COMPLETED && !it.outgoing }
+        val current = viewable.getOrNull(viewerIndex)
+        if (current == null) viewerIndex = -1 else Dialog(onDismissRequest = { viewerIndex = -1 },
+            properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            Box(Modifier.fillMaxSize().background(Color.Black)) {
+                val verified = ui.previews[current.id]
+                if (verified?.bitmap != null) {
+                    Image(verified.bitmap.asImageBitmap(), "Verified received image",
+                        Modifier.fillMaxSize().clickable { viewerIndex = -1 })
+                } else {
+                    LaunchedEffect(current.id) { if (verified == null) model.preview(current) }
+                    CircularProgressIndicator(Modifier.align(Alignment.Center))
+                }
+                if (viewerIndex > 0) Text("<", color = Color.White, fontSize = 28.sp,
+                    modifier = Modifier.align(Alignment.CenterStart).clickable { viewerIndex-- }.padding(20.dp))
+                if (viewerIndex < viewable.lastIndex) Text(">", color = Color.White, fontSize = 28.sp,
+                    modifier = Modifier.align(Alignment.CenterEnd).clickable { viewerIndex++ }.padding(20.dp))
+            }
         }
     }
 
@@ -116,6 +149,7 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
         if (file == null) detailId = null else ModalBottomSheet(onDismissRequest = { detailId = null }, containerColor = RelayColors.Card) {
             TransferDetail(file, connected, ui.busy, ui.labels[file.id], ui.previews[file.id], ui.message,
                 onAction = { model.action(file, it) }, onPreview = { model.preview(file) },
+                onView = { viewerIndex = files.filter { it.phase == BleFilePhase.COMPLETED && !it.outgoing }.indexOfFirst { it.id == file.id } },
                 onSave = { verified ->
                     destinationId = file.id.toString()
                     val name = "attachment-${file.id.toString().take(8)}.${verified.kind.extension}"
@@ -131,7 +165,8 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
 
 /** Compact transcript row: kind icon, honest name, state and live progress. Controls live only in the detail sheet. */
 @Composable
-internal fun TransferSummaryRow(file: BleFileStatus, kind: AttachmentKind?, filename: String?, onOpen: () -> Unit) {
+internal fun TransferSummaryRow(file: BleFileStatus, kind: AttachmentKind?, filename: String?,
+    preview: android.graphics.Bitmap? = null, onOpen: () -> Unit, onView: () -> Unit = {}) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -153,6 +188,10 @@ internal fun TransferSummaryRow(file: BleFileStatus, kind: AttachmentKind?, file
             }
             RIcon(R.drawable.relay_chevron, "Transfer details", tint = RelayColors.TextMuted, size = 18.dp)
         }
+        preview?.let { bmp ->
+            Image(bmp.asImageBitmap(), "Verified received image",
+                Modifier.fillMaxWidth().heightIn(max = 160.dp).clip(RoundedCornerShape(10.dp)).clickable(onClick = onView))
+        }
         if (file.phase == BleFilePhase.SENDING || file.phase == BleFilePhase.RECEIVING) {
             val progress = transferProgress(file.confirmedBytes, file.totalBytes)
             LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
@@ -172,7 +211,7 @@ internal fun transferStateColor(phase: BleFilePhase) = when (phase) {
 @Composable
 internal fun TransferDetail(file: BleFileStatus, connected: Boolean, busy: Boolean, filename: String?,
     verified: VerifiedAttachment?, message: String?, onAction: (BleFileAction) -> Unit,
-    onPreview: () -> Unit, onSave: (VerifiedAttachment) -> Unit) {
+    onPreview: () -> Unit, onSave: (VerifiedAttachment) -> Unit, onView: () -> Unit = {}) {
     val kind = verified?.kind
     Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(transferDisplayName(file.outgoing, filename, kind), color = RelayColors.TextPrimary, fontSize = RelayType.SubTitle, fontWeight = FontWeight.SemiBold)
@@ -215,7 +254,7 @@ internal fun TransferDetail(file: BleFileStatus, connected: Boolean, busy: Boole
         if (file.phase == BleFilePhase.COMPLETED && !file.outgoing) {
             if (verified == null) TextButton(enabled = !busy, onClick = onPreview) { Text("Check / preview received file") }
             verified?.let {
-                it.bitmap?.let { bmp -> Image(bmp.asImageBitmap(), "Verified received image", Modifier.fillMaxWidth().heightIn(max = 200.dp)) }
+                it.bitmap?.let { bmp -> Image(bmp.asImageBitmap(), "Verified received image", Modifier.fillMaxWidth().heightIn(max = 200.dp).clip(RoundedCornerShape(10.dp)).clickable(onClick = onView)) }
                 if (it.kind == AttachmentKind.PDF) Text("PDF verified. Open saved PDFs only with a trusted viewer.", color = RelayColors.TextSecondary, fontSize = RelayType.Label)
                 TextButton(enabled = !busy, onClick = { onSave(it) }) { Text("Save verified file…") }
             }
