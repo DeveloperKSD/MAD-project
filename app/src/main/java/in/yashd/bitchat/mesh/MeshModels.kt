@@ -44,7 +44,11 @@ data class ChatMessage(
     val receivedAtMs: Long?,
     val isPrivate: Boolean,
     val status: MessageStatus,
-    val direction: MessageDirection
+    val direction: MessageDirection,
+    /** Hops the delivery ACK travelled (0 = direct), null until delivered. */
+    val deliveredHops: Int? = null,
+    /** Sender's own message id on inbound messages, used to deduplicate re-sent packets. */
+    val senderMessageId: String? = null
 )
 
 data class BluetoothReadiness(

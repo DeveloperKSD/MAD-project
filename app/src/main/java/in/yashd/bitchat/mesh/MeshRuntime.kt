@@ -116,7 +116,7 @@ object MeshRuntime {
         transport = BleTransport(
             context = appContext,
             onPacket = { packet -> scope.launch { processTransportPacket(packet) } },
-            onLinkReady = { scope.launch { sendAnnouncement() } },
+            onLinkReady = { scope.launch { sendAnnouncement(); flushQueued() } },
             onError = ::addError,
             onLinkLost = {
                 peerManager.linkLost(it)
@@ -131,6 +131,7 @@ object MeshRuntime {
                 delay(30_000)
                 peerManager.expire()
                 sendAnnouncement()
+                flushQueued()
             }
         }
     }
@@ -171,22 +172,31 @@ object MeshRuntime {
             return@launch
         }
         val identity = localIdentity ?: return@launch
-        val peer = peerId?.let { peerManager.get(it) }
-        if (peerId != null && peer == null) {
-            addError("Unknown Nearby recipient; message was not sent.")
-            return@launch
-        }
-        val privateMessage = peer != null
-        val message = runCatching { messageStore.createOutbound(identity.peerId, peerId, body, privateMessage) }
+        // Out-of-range friends are queued, never blocked and never sent to the public group.
+        val message = runCatching { messageStore.createOutbound(identity.peerId, peerId, body, peerId != null) }
             .getOrElse { addError("Nearby history is unavailable; existing data was preserved."); return@launch }
+        dispatchOutbound(message)
+    }
+
+    /**
+     * Tries one dispatch of a queued message. Returns false (message stays Pending) when no
+     * link accepted it or the recipient's keys are not known yet; their next announcement
+     * supplies the keys and the flush retries. Runs only on the main scope, so a queued
+     * message is never dispatched twice at once.
+     */
+    private fun dispatchOutbound(message: ChatMessage): Boolean {
+        val identity = localIdentity ?: return false
+        if (message.direction != MessageDirection.Outbound || message.status != MessageStatus.Pending) return false
+        val peer = message.recipientId?.let { peerManager.get(it) }
+        if (message.isPrivate && peer == null) return false
         val payload = JSONObject()
             .put("messageId", message.messageId)
             .put("createdAtMs", message.createdAtMs)
-            .put("body", body)
+            .put("body", message.body)
             .toString()
             .encodeToByteArray()
-        val type = if (privateMessage) PacketType.ENCRYPTED else PacketType.MESSAGE
-        val finalPayload = if (privateMessage) {
+        val type = if (message.isPrivate) PacketType.ENCRYPTED else PacketType.MESSAGE
+        val finalPayload = if (message.isPrivate) {
             runCatching {
                 cryptoBox.encrypt(
                     localPrivateKey = identity.encryptionPrivateKey,
@@ -196,26 +206,27 @@ object MeshRuntime {
             }.getOrElse {
                 messageStore.updateStatus(message.messageId, null, MessageStatus.Failed)
                 addError("Couldn't send this private message. Reconnect and try again.")
-                return@launch
+                return false
             }
         } else {
             payload
         }
         val packet = runCatching {
-            PacketCodec.createSigned(type, identity.peerId, peerId, finalPayload, identity.signingPrivateKey)
+            PacketCodec.createSigned(type, identity.peerId, message.recipientId, finalPayload, identity.signingPrivateKey)
         }.getOrElse {
             messageStore.updateStatus(message.messageId, null, MessageStatus.Failed)
             addError("Couldn't send this message. Try a shorter message or reconnect.")
-            return@launch
+            return false
         }
-        val accepted = runCatching { transport?.send(PacketCodec.encode(packet)) == true }
-            .onFailure { addError("Nearby send failed.") }.getOrDefault(false)
-        messageStore.updateStatus(
-            message.messageId,
-            packet.packetId.toHex(),
-            if (accepted) MessageStatus.SentToTransport else MessageStatus.Failed
-        )
-        if (!accepted) addError("No Nearby link accepted the message. Turn on Nearby and retry.")
+        val accepted = runCatching { transport?.send(PacketCodec.encode(packet)) == true }.getOrDefault(false)
+        if (accepted) messageStore.updateStatus(message.messageId, packet.packetId.toHex(), MessageStatus.SentToTransport)
+        return accepted
+    }
+
+    /** Retries every queued message: on new links, on announcements and on the announce tick. */
+    fun flushQueued() = scope.launch {
+        if (!::messageStore.isInitialized) return@launch
+        messageStore.pendingOutbound().forEach { dispatchOutbound(it) }
     }
 
     /** Original Stage 2A service APIs; Stage 2B UI uses the result-bearing APIs below.
@@ -365,7 +376,10 @@ object MeshRuntime {
             return
         }
         when (decoded.type) {
-            PacketType.ANNOUNCE -> peerManager.upsertAnnouncement(announcedIdentity!!, packet.linkId, null, decoded.ttl == 5)
+            PacketType.ANNOUNCE -> {
+                peerManager.upsertAnnouncement(announcedIdentity!!, packet.linkId, null, decoded.ttl == 5)
+                flushQueued()
+            }
             PacketType.MESSAGE -> handleMessage(decoded, encrypted = false)
             PacketType.ENCRYPTED -> handleMessage(decoded, encrypted = true)
             PacketType.ACK -> handleAck(decoded)
@@ -396,7 +410,8 @@ object MeshRuntime {
             senderId = decoded.senderId,
             recipientId = decoded.recipientId,
             body = json.optString("body"),
-            isPrivate = encrypted
+            isPrivate = encrypted,
+            senderMessageId = json.optString("messageId").takeIf { it.isNotBlank() }
         ) }.getOrElse { addError("Nearby history is unavailable; existing data was preserved."); return }
         val notificationNow = System.currentTimeMillis()
         notificationPackets.entries.removeAll { it.value < notificationNow - 10 * 60_000 }
@@ -413,7 +428,7 @@ object MeshRuntime {
     private fun handleAck(decoded: MeshPacket) {
         val json = runCatching { JSONObject(decoded.payload.decodeToString()) }.getOrNull() ?: return
         if (decoded.recipientId != localIdentity?.peerId) return
-        runCatching { messageStore.markPacketDelivered(json.optString("ackedPacketId"), decoded.senderId) }
+        runCatching { messageStore.markPacketDelivered(json.optString("ackedPacketId"), decoded.senderId, 5 - decoded.ttl) }
             .onFailure { addError("Nearby history is unavailable; existing data was preserved.") }
     }
 

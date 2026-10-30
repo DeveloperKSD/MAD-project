@@ -40,8 +40,11 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
         return message
     }
 
-    fun addInbound(packetIdHex: String, senderId: String, recipientId: String?, body: String, isPrivate: Boolean): Boolean {
-        if (messages.values.any { it.packetIdHex == packetIdHex }) return false
+    fun addInbound(packetIdHex: String, senderId: String, recipientId: String?, body: String, isPrivate: Boolean,
+                   senderMessageId: String? = null): Boolean {
+        // A queued message re-sent with a new packet still carries the same sender message id.
+        if (messages.values.any { it.packetIdHex == packetIdHex ||
+                (senderMessageId != null && it.senderMessageId == senderMessageId) }) return false
         val now = System.currentTimeMillis()
         put(
             ChatMessage(
@@ -54,11 +57,16 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
                 receivedAtMs = now,
                 isPrivate = isPrivate,
                 status = MessageStatus.Delivered,
-                direction = MessageDirection.Inbound
+                direction = MessageDirection.Inbound,
+                senderMessageId = senderMessageId
             )
         )
         return true
     }
+
+    /** Outbound messages waiting for a route, oldest first. */
+    fun pendingOutbound(): List<ChatMessage> =
+        messages.values.filter { it.direction == MessageDirection.Outbound && it.status == MessageStatus.Pending }
 
     fun updateStatus(messageId: String, packetIdHex: String?, status: MessageStatus) {
         messages[messageId]?.let {
@@ -66,10 +74,10 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
         }
     }
 
-    fun markPacketDelivered(packetIdHex: String, senderId: String) {
+    fun markPacketDelivered(packetIdHex: String, senderId: String, hops: Int? = null) {
         messages.values.firstOrNull { it.packetIdHex == packetIdHex && it.direction == MessageDirection.Outbound &&
             (it.recipientId == senderId || it.recipientId == null) }?.let {
-            updateStatus(it.messageId, packetIdHex, MessageStatus.Delivered)
+            put(it.copy(packetIdHex = packetIdHex, status = MessageStatus.Delivered, deliveredHops = hops))
         }
     }
 
@@ -104,8 +112,7 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
     private fun save() {
         val array = JSONArray()
         messages.values.toList().takeLast(200).forEach { message ->
-            array.put(
-                JSONObject()
+            val item = JSONObject()
                     .put("messageId", message.messageId)
                     .put("packetIdHex", message.packetIdHex)
                     .put("senderId", message.senderId)
@@ -116,7 +123,9 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
                     .put("isPrivate", message.isPrivate)
                     .put("status", message.status.name)
                     .put("direction", message.direction.name)
-            )
+            if (message.deliveredHops != null) item.put("deliveredHops", message.deliveredHops)
+            if (message.senderMessageId != null) item.put("senderMessageId", message.senderMessageId)
+            array.put(item)
         }
         if (!cipher.exists()) cipher.create()
         val encrypted = cipher.encrypt(array.toString(), "nearby-messages-v1").encode64()
@@ -142,14 +151,15 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
                     receivedAtMs = if (item.isNull("receivedAtMs")) null else item.getLong("receivedAtMs"),
                     isPrivate = item.getBoolean("isPrivate"),
                     status = MessageStatus.valueOf(item.getString("status")),
-                    direction = MessageDirection.valueOf(item.getString("direction"))
+                    direction = MessageDirection.valueOf(item.getString("direction")),
+                    deliveredHops = if (item.has("deliveredHops")) item.getInt("deliveredHops") else null,
+                    senderMessageId = item.optString("senderMessageId").takeIf { it.isNotBlank() && it != "null" }
                 )
                 loaded[message.messageId] = message
             }
-            val interrupted = loaded.values.any { it.status == MessageStatus.Pending }
-            loaded.replaceAll { _, message -> if (message.status == MessageStatus.Pending) message.copy(status = MessageStatus.Failed) else message }
+            // Queued (Pending) messages intentionally survive restarts; the runtime flushes them.
             messages.putAll(loaded.entries.toList().takeLast(200).associate { it.toPair() })
-            if (encrypted == null || interrupted) save()
+            if (encrypted == null) save()
             publish()
         } catch (_: Exception) {
             messages.clear()

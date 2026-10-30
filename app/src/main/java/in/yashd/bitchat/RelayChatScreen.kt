@@ -100,9 +100,17 @@ private fun nearbyBubbles(mesh: MeshUiState, peerId: String?, hidden: List<Strin
             atMs = m.createdAtMs,
             sender = if (!mine && peerId == null) names[m.senderId]?.ifBlank { null } ?: m.senderId.take(8) else null,
             status = if (!mine) null else when (m.status) {
-                MessageStatus.Pending -> "Sending • BLE"
+                MessageStatus.Pending -> when {
+                    !mesh.serviceRunning -> "Queued • Nearby is off"
+                    peerId == null -> "Queued • sends when someone's nearby"
+                    else -> "Queued • sends when they're in range"
+                }
                 MessageStatus.SentToTransport -> if (peerId == null) "Sent • Nearby group" else "Sent • BLE"
-                MessageStatus.Delivered -> "Delivered • BLE"
+                MessageStatus.Delivered -> when (m.deliveredHops) {
+                    null, 0 -> "Delivered • BLE"
+                    1 -> "Delivered • via 1 hop"
+                    else -> "Delivered • via ${m.deliveredHops} hops"
+                }
                 MessageStatus.Read -> "Read • BLE"
                 MessageStatus.Failed -> "Not sent • Tap to retry"
             },
@@ -202,12 +210,8 @@ internal fun RelayChatScreen(
 
     val send: () -> Unit = {
         if (info.nearby) {
-            val sent = sendNearbySafely(draft, info.target, MeshRuntime.state.value.peers, MeshRuntime::sendMessage)
-            if (sent) {
-                draft = ""
-            } else {
-                toast("This friend is no longer nearby. Find them in Discover before sending a private message.")
-            }
+            // Offline friends are queued by the runtime and sent when they're back in range.
+            if (sendNearbySafely(draft, info.target, MeshRuntime.state.value.peers, MeshRuntime::sendMessage)) draft = ""
         } else {
             sendInternet(info.publicId, draft)
             if (draft.toByteArray(Charsets.UTF_8).size <= 16_000) {
@@ -218,12 +222,7 @@ internal fun RelayChatScreen(
     val retry: (BubbleUi) -> Unit = { b ->
         val m = b.nearbyMessage
         if (m != null) {
-            val sent = sendNearbySafely(m.body, m.recipientId, MeshRuntime.state.value.peers, MeshRuntime::sendMessage)
-            if (sent) {
-                retried.add(m.messageId)
-            } else {
-                toast("This friend is no longer nearby. Your private message was not resent.")
-            }
+            if (sendNearbySafely(m.body, m.recipientId, MeshRuntime.state.value.peers, MeshRuntime::sendMessage)) retried.add(m.messageId)
         } else {
             toast("Couldn't send. Check your relays in Settings, then send it again.")
         }
