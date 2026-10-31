@@ -177,6 +177,16 @@ class NostrMessagingCoordinator(
         SendResult(recipientRelays.map { publish(it, wraps.recipientCopy) },
             senderRelays.map { publish(it, wraps.senderCopy) })
     }
+    /** Best-effort delivery receipt: same publish path, no durable state required from the caller. */
+    fun sendReceipt(recipient: String, originalRumorId: String): Future<SendResult> = task {
+        val local = identity.loadOrCreate().publicKeyHex
+        val recipientRelays = destinations(recipient)
+        val senderRelays = if (recipient == local) recipientRelays else destinations(local)
+        checkActive()
+        val wraps = identity.withSecret { checkActive(); nip17.createReceipt(it, recipient, originalRumorId) }
+        SendResult(recipientRelays.map { publish(it, wraps.recipientCopy) },
+            senderRelays.map { publish(it, wraps.senderCopy) })
+    }
     private fun publish(url: String, event: NostrEvent): Publication {
         checkActive()
         fun report(stage: Stage): Publication = Publication(event.id, url, stage).also { notifyUser { onPublication(it) } }

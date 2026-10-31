@@ -179,6 +179,18 @@ class RoomInternetHistoryRepository(
             dao.insert(records)
         }
     }
+    override suspend fun markDelivered(owner: String, rumorId: String, peer: String): Boolean = access { db, dao ->
+        validateKey(rumorId)
+        db.withTransaction {
+            val row = dao.rumor(owner, rumorId) ?: return@withTransaction false
+            // The receipt signer must be the original recipient of this outgoing message.
+            if (!row.outgoing || row.peer != peer) return@withTransaction false
+            if (row.status !in listOf(HistoryStatus.RELAY_ACCEPTED.name, HistoryStatus.UNKNOWN.name,
+                    HistoryStatus.SENDER_COPY_RECEIVED.name)) return@withTransaction false
+            dao.update(seal(row.copy(status = HistoryStatus.DELIVERED.name), body(row)))
+            true
+        }
+    }
     override suspend fun failed(owner: String, id: String, unknown: Boolean) = access { db, dao ->
         db.withTransaction {
             val row = requireNotNull(dao.message(owner, id))

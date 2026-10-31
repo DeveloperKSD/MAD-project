@@ -141,7 +141,7 @@ private fun internetBubbles(internet: RelayUiState, npub: String): List<BubbleUi
             sender = null,
             // Shown exactly as the app reports it: relay acceptance is not proof of delivery.
             status = if (m.outgoing) m.status else null,
-            ticks = if (m.outgoing && m.status.startsWith("Relay accepted")) 1 else 0,
+            ticks = if (!m.outgoing) 0 else if (m.status == "Delivered") 2 else if (m.status.startsWith("Relay accepted")) 1 else 0,
             failed = m.outgoing && (m.status.startsWith("Failed") || m.status.startsWith("Interrupted")),
             pending = m.outgoing && m.status == "Sending…",
             nearbyMessage = null

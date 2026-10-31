@@ -25,6 +25,13 @@ class TestHistoryRepository : InternetHistoryRepository {
         messages["$owner:$rumorId"] = SavedMessage(rumorId, rumorId, peer, body, outgoing, time, if (outgoing) HistoryStatus.SENDER_COPY_RECEIVED else HistoryStatus.RECEIVED)
     }
     override suspend fun publication(owner: String, id: String, result: NostrMessagingCoordinator.SendResult) { messages["$owner:$id"] = messages.getValue("$owner:$id").copy(status = publicationStatus(result)) }
+    override suspend fun markDelivered(owner: String, rumorId: String, peer: String): Boolean {
+        val entry = messages.entries.firstOrNull { it.key.startsWith("$owner:") && it.value.rumorId == rumorId } ?: return false
+        val m = entry.value
+        if (!m.outgoing || m.peer != peer || m.status !in listOf(HistoryStatus.RELAY_ACCEPTED, HistoryStatus.UNKNOWN, HistoryStatus.SENDER_COPY_RECEIVED)) return false
+        messages[entry.key] = m.copy(status = HistoryStatus.DELIVERED)
+        return true
+    }
     override suspend fun failed(owner: String, id: String, unknown: Boolean) { messages["$owner:$id"] = messages.getValue("$owner:$id").copy(status = if (unknown) HistoryStatus.UNKNOWN else HistoryStatus.FAILED) }
     override suspend fun interruptPending(owner: String) { messages.replaceAll { key, m -> if (key.startsWith("$owner:") && m.status == HistoryStatus.QUEUED) m.copy(status = HistoryStatus.UNKNOWN) else m } }
     override suspend fun deleteMessage(owner: String, id: String) { messages.remove("$owner:$id") }

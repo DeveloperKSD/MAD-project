@@ -34,6 +34,27 @@ class Nip17 {
         )
     }
 
+    /** Empty-bodied kind-14 receipt rumor with the same authenticated gift-wrap pipeline. */
+    fun createReceipt(
+        senderSecret: ByteArray,
+        recipientPublicKey: String,
+        originalRumorId: String,
+        createdAtSeconds: Long = System.currentTimeMillis() / 1000
+    ): Nip17GiftWraps {
+        require(recipientPublicKey.isLowercaseHex(32)) { "Invalid recipient" }
+        require(originalRumorId.matches(Regex("[0-9a-f]{64}"))) { "Invalid original rumor id" }
+        val sender = schnorr.publicKey(senderSecret).lowercaseHex()
+        val rumor = UnsignedNostrEvent(sender, createdAtSeconds, 14,
+            listOf(listOf("p", recipientPublicKey),
+                listOf(DeliveryReceipts.TAG, DeliveryReceipts.DELIVERED, originalRumorId)), "")
+        val json = NostrEventCodec.encodeRumor(rumor)
+        return Nip17GiftWraps(
+            wrap(json, senderSecret, recipientPublicKey, createdAtSeconds),
+            wrap(json, senderSecret, sender, createdAtSeconds),
+            NostrEventCodec.calculateId(rumor)
+        )
+    }
+
     /**
      * expectedRecipient is the original kind-14 recipient, including for a sender copy.
      * expectedSender is the conversation peer who authored the message. Neither is inferred

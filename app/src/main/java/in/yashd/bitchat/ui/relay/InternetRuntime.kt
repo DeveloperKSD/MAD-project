@@ -17,6 +17,8 @@ interface InternetSession : Closeable {
     fun receive(inboxes: List<String>): Future<Unit>
     fun announce(inboxes: List<String>): Future<List<NostrMessagingCoordinator.Publication>>
     fun send(recipient: String, body: String, prepared: (String) -> Unit): Future<NostrMessagingCoordinator.SendResult>
+    /** Null when this session cannot send receipts; the runtime then leaves senders at relay-accepted. */
+    fun sendReceipt(recipient: String, originalRumorId: String): Future<NostrMessagingCoordinator.SendResult>? = null
 }
 interface InternetBackend : Closeable {
     fun identity(): NostrIdentity
@@ -362,11 +364,17 @@ class InternetRuntime(private val backend: InternetBackend,
                 val peer = if (outgoing) rumor.tags.firstOrNull { it.firstOrNull() == "p" }?.getOrNull(1) ?: rumor.pubkey else rumor.pubkey
                 val id = NostrEventCodec.calculateId(rumor)
                 if (rumor.createdAtSeconds > Long.MAX_VALUE / 1000) return@launch
+                val receiptOf = DeliveryReceipts.receiptTarget(rumor)
+                if (receiptOf != null) { if (!outgoing) acknowledgeDelivery(rumor.pubkey, receiptOf); return@launch }
                 var inserted = false
                 val stored = store(id) { owner ->
                     if (!current()) return@store
                     inserted = !history.containsRumor(owner, id)
                     history.received(owner, id, peer, rumor.content, outgoing, rumor.createdAtSeconds * 1000)
+                }
+                if (stored && inserted && !outgoing) {
+                    pendingReceipts.add(peer to id)
+                    session?.let { sendReceipts(it) }
                 }
                 if (stored && inserted && !outgoing && current() &&
                     `in`.yashd.bitchat.notifications.NotificationPolicy.isLive(rumor.createdAtSeconds * 1000, receiveStartedAt, System.currentTimeMillis())) {
@@ -381,12 +389,39 @@ class InternetRuntime(private val backend: InternetBackend,
             return
         }
         session = opened
+        sendReceipts(opened)
         scope.launch {
             try { await(opened.receive(snapshot.inboxes)) }
             catch (e: CancellationException) { throw e }
             catch (_: Exception) { synchronized(lock) { if (current()) error("Could not start inbox subscriptions. Check the relays and network.") } }
         }
     }
+    /** Newly stored incoming rumors awaiting a delivered receipt, keyed by rumor id (in-memory,
+     * best-effort: if the app dies first, the sender honestly stays at relay-accepted). */
+    private val pendingReceipts = java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>()
+
+    private fun sendReceipts(session: InternetSession) {
+        val transport = session
+        for ((peer, rumorId) in pendingReceipts.toList()) {
+            scope.launch {
+                val sent = runCatching {
+                    val result = transport.sendReceipt(peer, rumorId) ?: return@runCatching false
+                    await(result).recipient.any { it.stage == NostrMessagingCoordinator.Stage.RELAY_ACCEPTED }
+                }.getOrDefault(false)
+                if (sent) pendingReceipts.remove(peer to rumorId)
+            }
+        }
+    }
+
+    /** Handles an incoming delivered receipt: correlates to an outgoing message we sent to the
+     * authenticated receipt signer, then marks it delivered. Never stored, never rendered. */
+    private suspend fun acknowledgeDelivery(receiptSigner: String, targetRumorId: String) {
+        val marked = store { owner -> history.markDelivered(owner, targetRumorId, receiptSigner) }
+        if (marked) historyGate.withLock {
+            runCatching { mergeHistory(history.changes(state.value.publicKey, targetRumorId, receiptSigner)) }
+        }
+    }
+
     /** Pull-to-refresh: reconnect when the session is down, otherwise re-subscribe the inbox. */
     fun refresh() = synchronized(lock) {
         if (closed || state.value.configurationLoading || state.value.configurationError != null ||
@@ -512,6 +547,9 @@ class InternetRuntime(private val backend: InternetBackend,
                 historyGate.withLock {
                     job.ensureActive()
                     val id = NostrEventCodec.calculateId(rumor)
+                    val receiptOf = DeliveryReceipts.receiptTarget(rumor)
+                    if (receiptOf != null) { if (!outgoing) history.markDelivered(owner, receiptOf, rumor.pubkey); return@action }
+                    if (!outgoing && !history.containsRumor(owner, id)) pendingReceipts.add(peer to id)
                     history.received(owner, id, peer, rumor.content, outgoing, rumor.createdAtSeconds * 1000)
                     // Keep an already-open latest thread current on resume, while preserving
                     // the same older-page/read-position rules used by foreground reception.
