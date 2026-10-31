@@ -54,8 +54,8 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
     var picker by rememberSaveable(peerId) { mutableStateOf(false) }
     var handledRequest by rememberSaveable(peerId) { mutableIntStateOf(0) }
     var destinationId by rememberSaveable { mutableStateOf<String?>(null) }
-    var detailId by rememberSaveable(peerId) { mutableStateOf<String?>(null) }
-    var viewerIndex by rememberSaveable(peerId) { mutableStateOf(-1) }
+    val detailId = ui.detailId
+    val viewerIndex = ui.viewerIndex
     val peer = mesh.peers.firstOrNull { it.identity.peerId == peerId }
     val connected = mesh.serviceRunning && peer?.state == PeerConnectionState.Authenticated && peer.identity.verified
     val multiHop = peer?.directDeviceAddress == null
@@ -111,34 +111,19 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
     if (ui.busy) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("Checking attachment…", color = RelayColors.TextSecondary) }
     (loadError ?: ui.message)?.let { Text(it, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = RelayColors.TextSecondary) }
 
-    // Pending/active transfers stay compact summaries; completed transfers become media bubbles.
-    val active = files.filter { !galleryEligible(it) }
-    val completed = files.filter { galleryEligible(it) }
-    if (files.isNotEmpty()) LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp).testTag("nearby-attachments"),
-        contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(active, key = { it.id.toString() }) { file ->
-            TransferSummaryRow(file, ui.previews[file.id]?.kind, ui.labels[file.id],
-                onOpen = { detailId = file.id.toString() })
-        }
-        items(completed, key = { it.id.toString() }) { file ->
-            MediaBubble(file, ui.previews[file.id]?.bitmap, ui.previews[file.id]?.kind, ui.labels[file.id],
-                mine = file.outgoing, onView = { viewerIndex = completed.indexOf(file) })
-        }
-    }
-
     // Full-screen viewer with left/right swipe across verified received images.
     if (viewerIndex >= 0) {
         val viewable = files.filter { galleryEligible(it) }
-        if (viewable.isEmpty()) viewerIndex = -1
-        else AttachmentPagerViewer(viewable, ui.previews, viewerIndex, model::quietPreview) { viewerIndex = -1 }
+        if (viewable.isEmpty()) model.closeViewer()
+        else AttachmentPagerViewer(viewable, ui.previews, viewerIndex, model::quietPreview) { model.closeViewer() }
     }
 
     detailId?.let { id ->
         val file = files.firstOrNull { it.id.toString() == id }
-        if (file == null) detailId = null else ModalBottomSheet(onDismissRequest = { detailId = null }, containerColor = RelayColors.Card) {
+        if (file == null) model.closeDetail() else ModalBottomSheet(onDismissRequest = { model.closeDetail() }, containerColor = RelayColors.Card) {
             TransferDetail(file, connected, ui.busy, ui.labels[file.id], ui.previews[file.id], ui.message,
                 onAction = { model.action(file, it) }, onPreview = { model.preview(file) },
-                onView = { viewerIndex = files.filter { galleryEligible(it) }.indexOfFirst { it.id == file.id } },
+                onView = { model.openViewer(files.filter { galleryEligible(it) }.indexOfFirst { it.id == file.id }) },
                 onSave = { verified ->
                     destinationId = file.id.toString()
                     val name = "attachment-${file.id.toString().take(8)}.${verified.kind.extension}"
@@ -263,31 +248,43 @@ internal fun NearbyAttachmentConfirmation(draft: PickedAttachment, recipient: St
         dismissButton = { TextButton(enabled = !busy, onClick = dismiss) { Text("Cancel selection") } })
 }
 
-/** Chat media bubble for a completed transfer: images render in a direction-aligned bubble,
+/** Chat media bubble for a completed transfer: the photo fills a thin rounded frame at its own
+ * proportions, with the time (and outgoing delivery ticks) overlaid bottom-right on a scrim.
  * PDFs show an honest file row. Tapping opens the swipe viewer. */
 @Composable
 internal fun MediaBubble(file: BleFileStatus, bitmap: android.graphics.Bitmap?, kind: AttachmentKind?, filename: String?,
     mine: Boolean, onView: () -> Unit) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
-        Column(
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+        Box(
             Modifier
                 .clip(RoundedCornerShape(14.dp))
                 .background(if (mine) RelayColors.BlueBubble else RelayColors.Card)
                 .clickable(onClick = onView)
-                .padding(4.dp)
         ) {
             if (bitmap != null) {
                 Image(bitmap.asImageBitmap(), if (mine) "Sent image" else "Received image",
-                    Modifier.widthIn(max = 240.dp).heightIn(max = 280.dp).clip(RoundedCornerShape(12.dp)))
+                    Modifier.widthIn(max = 260.dp).aspectRatio(bitmap.width.toFloat() / bitmap.height.toFloat()).padding(3.dp).clip(RoundedCornerShape(11.dp)))
+                Row(
+                    Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = 8.dp)
+                        .clip(RoundedCornerShape(8.dp)).background(Color(0x99000000)).padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (file.createdAtMs > 0) Text(clockTime(file.createdAtMs), color = Color.White, fontSize = RelayType.Meta)
+                    if (mine) {
+                        Spacer(Modifier.width(3.dp))
+                        RIcon(R.drawable.relay_check_double, "Verified delivered", tint = Color.White, size = 13.dp)
+                    }
+                }
             } else {
-                Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     RIcon(
                         if (kind == AttachmentKind.JPEG || kind == AttachmentKind.PNG) R.drawable.relay_image else R.drawable.relay_storage,
                         null, tint = RelayColors.TextSecondary, size = 22.dp)
                     Spacer(Modifier.width(10.dp))
                     Column {
                         Text(transferDisplayName(file.outgoing, filename, kind), color = RelayColors.TextPrimary, fontSize = 15.sp)
-                        Text("Verified", color = RelayColors.TextSecondary, fontSize = RelayType.Meta)
+                        Text(if (file.createdAtMs > 0) "Verified · ${clockTime(file.createdAtMs)}" else "Verified",
+                            color = RelayColors.TextSecondary, fontSize = RelayType.Meta)
                     }
                 }
             }

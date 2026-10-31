@@ -34,6 +34,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -59,6 +60,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModelProvider
+import `in`.yashd.bitchat.attachments.NearbyAttachmentModel
+import `in`.yashd.bitchat.attachments.galleryEligible
 import `in`.yashd.bitchat.mesh.ChatMessage
 import `in`.yashd.bitchat.mesh.MeshRuntime
 import `in`.yashd.bitchat.mesh.MeshUiState
@@ -92,6 +96,13 @@ internal data class BubbleUi(
 internal sealed interface ThreadRow {
     data class Day(val key: String, val label: String) : ThreadRow
     data class Message(val bubble: BubbleUi, val bigGapBefore: Boolean = false) : ThreadRow
+    data class Attachment(val file: `in`.yashd.bitchat.transfer.ble.BleFileStatus, val atMs: Long, val mine: Boolean,
+        val bigGapBefore: Boolean = false) : ThreadRow
+}
+
+/** One attachment placed by its transfer start time; legacy records without a timestamp sort last. */
+internal data class AttachmentItem(val file: `in`.yashd.bitchat.transfer.ble.BleFileStatus) {
+    val sortKey: Long = if (file.createdAtMs > 0) file.createdAtMs else Long.MAX_VALUE
 }
 
 private fun nearbyBubbles(mesh: MeshUiState, peerId: String?, hidden: List<String>): List<BubbleUi> {
@@ -148,22 +159,38 @@ private fun internetBubbles(internet: RelayUiState, npub: String): List<BubbleUi
         )
     }
 
-internal fun withDays(bubbles: List<BubbleUi>, now: Long): List<ThreadRow> {
-    val rows = ArrayList<ThreadRow>(bubbles.size + 4)
+internal fun withDays(bubbles: List<BubbleUi>, now: Long, attachments: List<AttachmentItem> = emptyList()): List<ThreadRow> {
+    val rows = ArrayList<ThreadRow>(bubbles.size + attachments.size + 4)
     var lastDay: Long? = null
     var lastMine: Boolean? = null
-    for (b in bubbles) {
-        var dayBreak = false
-        if (b.atMs > 0 && (lastDay == null || !sameDay(lastDay, b.atMs))) {
-            rows.add(ThreadRow.Day("day-${b.id}", dayTitle(b.atMs, now)))
-            lastDay = b.atMs
-            dayBreak = true
+    fun dayBreak(atMs: Long, key: String): Boolean {
+        val prev = lastDay
+        if (atMs > 0 && atMs != Long.MAX_VALUE && (prev == null || !sameDay(prev, atMs))) {
+            rows.add(ThreadRow.Day(key, dayTitle(atMs, now)))
+            lastDay = atMs
+            return true
         }
-        // A new same-sender run starts after a day break or a side switch; runs get a
-        // tail on their first bubble and a larger gap above them.
-        val runStart = dayBreak || lastMine == null || lastMine != b.mine
-        rows.add(ThreadRow.Message(b.copy(runStart = runStart), bigGapBefore = !dayBreak && lastMine != null && lastMine != b.mine))
-        lastMine = b.mine
+        return false
+    }
+    // Merge messages and attachments by time; messages win ties to keep a transfer after its text.
+    val items = (bubbles.map { Triple(it.atMs, 0, it) } + attachments.map { Triple(it.sortKey, 1, it) })
+        .sortedWith(compareBy({ it.first }, { it.second }))
+    for ((atMs, kind, item) in items) {
+        if (kind == 0) {
+            val b = item as BubbleUi
+            val dayBreak = dayBreak(b.atMs, "day-${b.id}")
+            // A new same-sender run starts after a day break or a side switch; runs get a
+            // tail on their first bubble and a larger gap above them.
+            val runStart = dayBreak || lastMine == null || lastMine != b.mine
+            rows.add(ThreadRow.Message(b.copy(runStart = runStart), bigGapBefore = !dayBreak && lastMine != null && lastMine != b.mine))
+            lastMine = b.mine
+        } else {
+            val a = item as AttachmentItem
+            val dayBreak = dayBreak(atMs, "day-att-${a.file.id}")
+            rows.add(ThreadRow.Attachment(a.file, a.file.createdAtMs, a.file.outgoing,
+                bigGapBefore = !dayBreak && lastMine != null))
+            lastMine = a.file.outgoing
+        }
     }
     return rows
 }
@@ -196,7 +223,11 @@ internal fun RelayChatScreen(
     var draft by remember(info.route) { mutableStateOf("") }
     val retried = remember(info.route) { mutableStateListOf<String>() }
     val bubbles = if (info.nearby) nearbyBubbles(mesh, info.target, retried) else internetBubbles(internet, info.publicId)
-    val rows = withDays(bubbles, now)
+    val allTransfers by MeshRuntime.fileTransfers.collectAsState()
+    val attachmentModel = remember(context) { ViewModelProvider(context.activity())[NearbyAttachmentModel::class.java] }
+    val attachmentUi by attachmentModel.state.collectAsState()
+    val transferFiles = if (info.nearby && info.target != null) allTransfers.filter { it.peer == info.target } else emptyList()
+    val rows = withDays(bubbles, now, transferFiles.map { AttachmentItem(it) })
     val lastMineId = bubbles.lastOrNull { it.mine }?.id
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -297,6 +328,7 @@ internal fun RelayChatScreen(
                         when (row) {
                             is ThreadRow.Day -> row.key
                             is ThreadRow.Message -> row.bubble.id
+                            is ThreadRow.Attachment -> "att-${row.file.id}"
                         }
                     }) { row ->
                         when (row) {
@@ -311,6 +343,23 @@ internal fun RelayChatScreen(
                                         .padding(horizontal = 12.dp, vertical = 5.dp)
                                 ) {
                                     Text(text = row.label, color = RelayColors.TextSecondary, fontSize = 12.sp)
+                                }
+                            }
+                            is ThreadRow.Attachment -> Box(
+                                modifier = Modifier.padding(top = if (row.bigGapBefore) 8.dp else 0.dp)
+                            ) {
+                                if (galleryEligible(row.file)) {
+                                    MediaBubble(row.file, attachmentUi.previews[row.file.id]?.bitmap,
+                                        attachmentUi.previews[row.file.id]?.kind, attachmentUi.labels[row.file.id],
+                                        mine = row.mine,
+                                        onView = {
+                                            attachmentModel.openViewer(
+                                                transferFiles.filter { galleryEligible(it) }.indexOfFirst { it.id == row.file.id })
+                                        })
+                                } else {
+                                    TransferSummaryRow(row.file, attachmentUi.previews[row.file.id]?.kind,
+                                        attachmentUi.labels[row.file.id],
+                                        onOpen = { attachmentModel.openDetail(row.file.id.toString()) })
                                 }
                             }
                             is ThreadRow.Message -> Box(

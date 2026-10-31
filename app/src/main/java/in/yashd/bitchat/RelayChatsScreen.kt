@@ -380,7 +380,7 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean,
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 16.dp, vertical = 9.dp),
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         ConversationAvatar(info, 42)

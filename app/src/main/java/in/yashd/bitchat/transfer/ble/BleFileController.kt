@@ -76,6 +76,7 @@ class BleFileController(
         val manifest = engine.prepareOutgoing(input, profile).manifest
         val binding = BleFileBinding(manifest, profile, remote,
             BleFileProtocol.fingerprint(BleFileProtocol.peer(local)), BleFileProtocol.binding(local, remote, manifest, profile), true, BleFileProtocol.nonce())
+        binding.createdAtMs = clock()
         bindings[manifest.id] = binding
         persist(); handshakeDeadline = clock() + 30_000; controlAttempt = Attempt(clock(), 0); emitOffer(binding, false)
         return manifest.id
@@ -275,7 +276,7 @@ class BleFileController(
         offerAt = clock(); handshakeDeadline = clock() + 30_000; controlAttempt = Attempt(clock(), 0)
         bindings[header.id] = BleFileBinding(manifest, header.profile, remote,
             BleFileProtocol.fingerprint(BleFileProtocol.peer(local)), header.binding, false, header.epoch,
-            phase = BleFilePhase.AWAITING_ACCEPTANCE)
+            phase = BleFilePhase.AWAITING_ACCEPTANCE, createdAtMs = clock())
         persist() // No incoming payload allocation until explicit authenticated acceptance.
     }
 
@@ -368,7 +369,7 @@ class BleFileController(
     }
     private fun publish() {
         mutable.value = bindings.values.map { BleFileStatus(it.manifest.id, it.remote.peerId, it.phase, it.outgoing,
-            snapshotOrNull(it.manifest.id)?.confirmedBytes ?: 0, it.manifest.sizeBytes, it.profile) }
+            snapshotOrNull(it.manifest.id)?.confirmedBytes ?: 0, it.manifest.sizeBytes, it.profile, it.createdAtMs) }
     }
     @Synchronized override fun close() {
         if (closed) return

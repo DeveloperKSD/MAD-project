@@ -3,6 +3,9 @@ package `in`.yashd.bitchat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import `in`.yashd.bitchat.transfer.TransferProfile
+import `in`.yashd.bitchat.transfer.ble.BleFilePhase
+import `in`.yashd.bitchat.transfer.ble.BleFileStatus
 import org.junit.Test
 
 class ChatThreadGroupingTest {
@@ -40,5 +43,29 @@ class ChatThreadGroupingTest {
         assertTrue(rows.any { it is ThreadRow.Day })
         assertTrue(msgs[1].bubble.runStart)
         assertFalse(msgs[1].bigGapBefore)
+    }
+
+    @Test
+    fun `attachment lands in chronological position with day grouping`() {
+        val base = 1_700_000_000_000L
+        val file = BleFileStatus(java.util.UUID.randomUUID(), "peer", BleFilePhase.COMPLETED, true,
+            100L, 100L, TransferProfile.DIRECT_BLE, createdAtMs = base + 30_000)
+        val rows = withDays(listOf(bubble("a", false, base), bubble("b", false, base + 60_000)), base,
+            listOf(AttachmentItem(file)))
+        val order = rows.map { when (it) {
+            is ThreadRow.Day -> "day"
+            is ThreadRow.Message -> it.bubble.id
+            is ThreadRow.Attachment -> "att"
+        } }
+        assertEquals(listOf("day", "a", "att", "b"), order)
+    }
+
+    @Test
+    fun `legacy attachment without timestamp sorts last`() {
+        val base = 1_700_000_000_000L
+        val file = BleFileStatus(java.util.UUID.randomUUID(), "peer", BleFilePhase.COMPLETED, false,
+            100L, 100L, TransferProfile.DIRECT_BLE, createdAtMs = 0L)
+        val rows = withDays(listOf(bubble("a", false, base)), base, listOf(AttachmentItem(file)))
+        assertTrue(rows.last() is ThreadRow.Attachment)
     }
 }

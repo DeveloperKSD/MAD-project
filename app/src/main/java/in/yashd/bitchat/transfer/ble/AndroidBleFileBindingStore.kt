@@ -41,7 +41,8 @@ class AndroidBleFileBindingStore internal constructor(
             require(str("acceptance").matches(Regex("[0-9a-f]{32}")) && str("local").matches(Regex("[0-9a-f]{64}")))
             require(str("binding").matches(Regex("[0-9a-f]{64}")))
             BleFileBinding(manifest, profile, remote, str("local"), str("binding"), row.getValue("outgoing").jsonPrimitive.boolean,
-                str("epoch"), str("acceptance"), BleFilePhase.valueOf(str("phase")))
+                str("epoch"), str("acceptance"), BleFilePhase.valueOf(str("phase")),
+                createdAtMs = row["at"]?.jsonPrimitive?.long ?: 0L)
         }.also { require(it.map { row -> row.manifest.id }.distinct().size == it.size) }
     }
     @Synchronized override fun save(bindings: List<BleFileBinding>) {
@@ -57,6 +58,7 @@ class AndroidBleFileBindingStore internal constructor(
                 put("enc", binding.remote.encryptionPublicKey.hex()); put("sign", binding.remote.signingPublicKey.hex())
                 put("local", binding.localFingerprint); put("binding", binding.binding); put("outgoing", binding.outgoing)
                 put("epoch", binding.epoch); put("acceptance", binding.acceptance); put("phase", binding.phase.name)
+                put("at", binding.createdAtMs)
             } }))
         }.toString()
         val encrypted = cipher.encrypt(json, "ble-file-bindings-v1")
