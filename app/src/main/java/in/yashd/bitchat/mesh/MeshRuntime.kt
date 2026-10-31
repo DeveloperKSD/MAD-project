@@ -37,6 +37,7 @@ object MeshRuntime {
     private lateinit var identityManager: IdentityManager
     private lateinit var readinessChecker: BluetoothReadinessChecker
     private lateinit var peerManager: PeerManager
+    private lateinit var nicknameStore: PeerNicknameStore
     private lateinit var messageStore: MessageStore
     private lateinit var requestsStore: NearbyRequestsStore
     /** Signed control messages (e.g. request_accept) awaiting a route, retried with the queue. */
@@ -86,6 +87,9 @@ object MeshRuntime {
         identityManager = IdentityManager(appContext)
         readinessChecker = BluetoothReadinessChecker(appContext)
         peerManager = PeerManager()
+        nicknameStore = PeerNicknameStore(appContext)
+        if (nicknameStore.storageError) addError("Saved nearby names are unavailable; live names will be kept for this session.")
+        scope.launch { nicknameStore.names.collect { publishState() } }
         messageStore = MessageStore(appContext)
         if (messageStore.storageError) addError("Nearby history is unavailable; existing data was preserved.")
         requestsStore = NearbyRequestsStore(appContext)
@@ -447,6 +451,7 @@ object MeshRuntime {
         when (decoded.type) {
             PacketType.ANNOUNCE -> {
                 peerManager.upsertAnnouncement(announcedIdentity!!, packet.linkId, null, decoded.ttl == 5)
+                if (::nicknameStore.isInitialized) nicknameStore.remember(announcedIdentity!!.peerId, announcedIdentity!!.displayName)
                 flushQueued()
             }
             PacketType.MESSAGE -> handleMessage(decoded, encrypted = false)
@@ -561,6 +566,7 @@ object MeshRuntime {
             bluetoothReadiness = readiness,
             serviceRunning = serviceRunning,
             peers = if (::peerManager.isInitialized) peerManager.peers.value else emptyList(),
+            knownNames = if (::nicknameStore.isInitialized) nicknameStore.names.value else emptyMap(),
             currentConversation = if (::messageStore.isInitialized) messageStore.conversation.value else emptyList(),
             errors = _state.value.errors
         )

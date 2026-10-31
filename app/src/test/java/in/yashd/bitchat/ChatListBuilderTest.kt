@@ -71,3 +71,50 @@ class ChatListBuilderTest {
         assertEquals(listOf("bob", "alice"), items.map { it.info.target })
     }
 }
+
+class PeerNicknameFallbackTest {
+    private fun chatWith(vararg messages: ChatMessage) =
+        buildChatList(RelayUiState(), MeshUiState(localPeerId = "me", currentConversation = messages.toList()),
+            emptyMap(), sessionStart = 0L).single { it.info.target == "friend" }
+
+    private fun msg(id: String, sender: String, to: String) = ChatMessage(id, null, sender, to, "body $id", 4000L, 4000L,
+        true, MessageStatus.Delivered, MessageDirection.Inbound)
+
+    @Test fun offlinePeerKeepsLastKnownName() {
+        val item = buildChatList(RelayUiState(),
+            MeshUiState(localPeerId = "me", knownNames = mapOf("friend" to "Mira"),
+                currentConversation = listOf(msg("m", "friend", "me"))),
+            emptyMap(), sessionStart = 0L).single { it.info.target == "friend" }
+        assertEquals("Mira", item.info.title)
+    }
+
+    @Test fun unknownOfflinePeerFallsBackToId() {
+        assertEquals("friend", chatWith(msg("m", "friend", "me")).info.title.take(12))
+    }
+
+    @Test fun livePeerNameWinsOverStoredName() {
+        val peer = `in`.yashd.bitchat.mesh.PeerState(
+            `in`.yashd.bitchat.identity.PeerIdentity("friend", "Live Name", byteArrayOf(1), byteArrayOf(2), 0L, 0L, false),
+            `in`.yashd.bitchat.mesh.PeerConnectionState.Disconnected, null, null, null, null, null)
+        val item = buildChatList(RelayUiState(),
+            MeshUiState(localPeerId = "me", peers = listOf(peer), knownNames = mapOf("friend" to "Old Name"),
+                currentConversation = listOf(msg("m", "friend", "me"))),
+            emptyMap(), sessionStart = 0L).single { it.info.target == "friend" }
+        assertEquals("Live Name", item.info.title)
+    }
+
+    @Test fun nicknameStoreRoundTripsAndCaps() {
+        var map = mapOf("1" to "one")
+        map = `in`.yashd.bitchat.mesh.PeerNicknames.remember(map, "2", "two")
+        assertEquals(map, `in`.yashd.bitchat.mesh.PeerNicknames.decode(`in`.yashd.bitchat.mesh.PeerNicknames.encode(map)))
+        var big = emptyMap<String, String>()
+        repeat(600) { big = `in`.yashd.bitchat.mesh.PeerNicknames.remember(big, "id$it", "n$it") }
+        assertEquals(512, big.size)
+        assertTrue("id599" in big && "id0" !in big)
+    }
+
+    @Test fun blankNameNeverOverwritesSavedName() {
+        val map = `in`.yashd.bitchat.mesh.PeerNicknames.remember(mapOf("p" to "Mira"), "p", "  ")
+        assertEquals("Mira", map["p"])
+    }
+}

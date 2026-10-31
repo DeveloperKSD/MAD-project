@@ -77,6 +77,8 @@ data class MeshUiState(
     ),
     val serviceRunning: Boolean = false,
     val peers: List<PeerState> = emptyList(),
+    /** Last-known announced names for peers no longer in range; unverified labels, on-device only. */
+    val knownNames: Map<String, String> = emptyMap(),
     val currentConversation: List<ChatMessage> = emptyList(),
     val errors: List<String> = emptyList()
 )

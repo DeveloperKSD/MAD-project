@@ -50,7 +50,7 @@ internal fun describeRoute(route: String, mesh: MeshUiState, internet: RelayUiSt
         val title = when {
             target == null -> "Nearby group"
             peer != null && peer.identity.displayName.isNotBlank() -> peer.identity.displayName
-            else -> target.take(12)
+            else -> mesh.knownNames[target]?.ifBlank { null } ?: target.take(12)
         }
         val linkText = when {
             target == null -> if (mesh.serviceRunning) "Public group • $inRange in range" else "Public group • Nearby is off"
@@ -128,7 +128,7 @@ internal fun buildChatList(
     seenAt: Map<String, Long>,
     sessionStart: Long
 ): List<ChatListItem> {
-    val names = mesh.peers.associate { it.identity.peerId to it.identity.displayName }
+    val names = mesh.knownNames + mesh.peers.associate { it.identity.peerId to it.identity.displayName }
     return relayConversations(internet, mesh).mapNotNull { row ->
         val route = when (row.transport) {
             ConversationTransport.Nearby -> nearbyRoute(row.recipient)
