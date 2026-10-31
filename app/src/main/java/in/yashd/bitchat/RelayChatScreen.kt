@@ -34,6 +34,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -49,12 +50,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModelProvider
+import `in`.yashd.bitchat.attachments.NearbyAttachmentModel
+import `in`.yashd.bitchat.attachments.galleryEligible
 import `in`.yashd.bitchat.mesh.ChatMessage
 import `in`.yashd.bitchat.mesh.MeshRuntime
 import `in`.yashd.bitchat.mesh.MeshUiState
@@ -71,7 +79,7 @@ import kotlinx.coroutines.launch
 // ---------------------------------------------------------------------------
 
 /** One message as the screen draws it, whatever transport it came from. */
-private data class BubbleUi(
+internal data class BubbleUi(
     val id: String,
     val body: String,
     val mine: Boolean,
@@ -81,12 +89,20 @@ private data class BubbleUi(
     val ticks: Int,
     val failed: Boolean,
     val pending: Boolean,
-    val nearbyMessage: ChatMessage?
+    val nearbyMessage: ChatMessage?,
+    val runStart: Boolean = false
 )
 
-private sealed interface ThreadRow {
+internal sealed interface ThreadRow {
     data class Day(val key: String, val label: String) : ThreadRow
-    data class Message(val bubble: BubbleUi) : ThreadRow
+    data class Message(val bubble: BubbleUi, val bigGapBefore: Boolean = false) : ThreadRow
+    data class Attachment(val file: `in`.yashd.bitchat.transfer.ble.BleFileStatus, val atMs: Long, val mine: Boolean,
+        val bigGapBefore: Boolean = false) : ThreadRow
+}
+
+/** One attachment placed by its transfer start time; legacy records without a timestamp sort last. */
+internal data class AttachmentItem(val file: `in`.yashd.bitchat.transfer.ble.BleFileStatus) {
+    val sortKey: Long = if (file.createdAtMs > 0) file.createdAtMs else Long.MAX_VALUE
 }
 
 private fun nearbyBubbles(mesh: MeshUiState, peerId: String?, hidden: List<String>): List<BubbleUi> {
@@ -100,9 +116,17 @@ private fun nearbyBubbles(mesh: MeshUiState, peerId: String?, hidden: List<Strin
             atMs = m.createdAtMs,
             sender = if (!mine && peerId == null) names[m.senderId]?.ifBlank { null } ?: m.senderId.take(8) else null,
             status = if (!mine) null else when (m.status) {
-                MessageStatus.Pending -> "Sending • BLE"
+                MessageStatus.Pending -> when {
+                    !mesh.serviceRunning -> "Queued • Nearby is off"
+                    peerId == null -> "Queued • sends when someone's nearby"
+                    else -> "Queued • sends when they're in range"
+                }
                 MessageStatus.SentToTransport -> if (peerId == null) "Sent • Nearby group" else "Sent • BLE"
-                MessageStatus.Delivered -> "Delivered • BLE"
+                MessageStatus.Delivered -> when (m.deliveredHops) {
+                    null, 0 -> "Delivered • BLE"
+                    1 -> "Delivered • via ~1 hop"
+                    else -> "Delivered • via ~${m.deliveredHops} hops"
+                }
                 MessageStatus.Read -> "Read • BLE"
                 MessageStatus.Failed -> "Not sent • Tap to retry"
             },
@@ -128,22 +152,45 @@ private fun internetBubbles(internet: RelayUiState, npub: String): List<BubbleUi
             sender = null,
             // Shown exactly as the app reports it: relay acceptance is not proof of delivery.
             status = if (m.outgoing) m.status else null,
-            ticks = if (m.outgoing && m.status.startsWith("Relay accepted")) 1 else 0,
+            ticks = if (!m.outgoing) 0 else if (m.status == "Delivered") 2 else if (m.status.startsWith("Relay accepted")) 1 else 0,
             failed = m.outgoing && (m.status.startsWith("Failed") || m.status.startsWith("Interrupted")),
             pending = m.outgoing && m.status == "Sending…",
             nearbyMessage = null
         )
     }
 
-private fun withDays(bubbles: List<BubbleUi>, now: Long): List<ThreadRow> {
-    val rows = ArrayList<ThreadRow>(bubbles.size + 4)
+internal fun withDays(bubbles: List<BubbleUi>, now: Long, attachments: List<AttachmentItem> = emptyList()): List<ThreadRow> {
+    val rows = ArrayList<ThreadRow>(bubbles.size + attachments.size + 4)
     var lastDay: Long? = null
-    for (b in bubbles) {
-        if (b.atMs > 0 && (lastDay == null || !sameDay(lastDay, b.atMs))) {
-            rows.add(ThreadRow.Day("day-${b.id}", dayTitle(b.atMs, now)))
-            lastDay = b.atMs
+    var lastMine: Boolean? = null
+    fun dayBreak(atMs: Long, key: String): Boolean {
+        val prev = lastDay
+        if (atMs > 0 && atMs != Long.MAX_VALUE && (prev == null || !sameDay(prev, atMs))) {
+            rows.add(ThreadRow.Day(key, dayTitle(atMs, now)))
+            lastDay = atMs
+            return true
         }
-        rows.add(ThreadRow.Message(b))
+        return false
+    }
+    // Merge messages and attachments by time; messages win ties to keep a transfer after its text.
+    val items = (bubbles.map { Triple(it.atMs, 0, it) } + attachments.map { Triple(it.sortKey, 1, it) })
+        .sortedWith(compareBy({ it.first }, { it.second }))
+    for ((atMs, kind, item) in items) {
+        if (kind == 0) {
+            val b = item as BubbleUi
+            val dayBreak = dayBreak(b.atMs, "day-${b.id}")
+            // A new same-sender run starts after a day break or a side switch; runs get a
+            // tail on their first bubble and a larger gap above them.
+            val runStart = dayBreak || lastMine == null || lastMine != b.mine
+            rows.add(ThreadRow.Message(b.copy(runStart = runStart), bigGapBefore = !dayBreak && lastMine != null && lastMine != b.mine))
+            lastMine = b.mine
+        } else {
+            val a = item as AttachmentItem
+            val dayBreak = dayBreak(atMs, "day-att-${a.file.id}")
+            rows.add(ThreadRow.Attachment(a.file, a.file.createdAtMs, a.file.outgoing,
+                bigGapBefore = !dayBreak && lastMine != null))
+            lastMine = a.file.outgoing
+        }
     }
     return rows
 }
@@ -176,7 +223,11 @@ internal fun RelayChatScreen(
     var draft by remember(info.route) { mutableStateOf("") }
     val retried = remember(info.route) { mutableStateListOf<String>() }
     val bubbles = if (info.nearby) nearbyBubbles(mesh, info.target, retried) else internetBubbles(internet, info.publicId)
-    val rows = withDays(bubbles, now)
+    val allTransfers by MeshRuntime.fileTransfers.collectAsState()
+    val attachmentModel = remember(context) { ViewModelProvider(context.activity())[NearbyAttachmentModel::class.java] }
+    val attachmentUi by attachmentModel.state.collectAsState()
+    val transferFiles = if (info.nearby && info.target != null) allTransfers.filter { it.peer == info.target } else emptyList()
+    val rows = withDays(bubbles, now, transferFiles.map { AttachmentItem(it) })
     val lastMineId = bubbles.lastOrNull { it.mine }?.id
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -202,12 +253,8 @@ internal fun RelayChatScreen(
 
     val send: () -> Unit = {
         if (info.nearby) {
-            val sent = sendNearbySafely(draft, info.target, MeshRuntime.state.value.peers, MeshRuntime::sendMessage)
-            if (sent) {
-                draft = ""
-            } else {
-                toast("This friend is no longer nearby. Find them in Discover before sending a private message.")
-            }
+            // Offline friends are queued by the runtime and sent when they're back in range.
+            if (sendNearbySafely(draft, info.target, MeshRuntime.state.value.peers, MeshRuntime::sendMessage)) draft = ""
         } else {
             sendInternet(info.publicId, draft)
             if (draft.toByteArray(Charsets.UTF_8).size <= 16_000) {
@@ -218,12 +265,7 @@ internal fun RelayChatScreen(
     val retry: (BubbleUi) -> Unit = { b ->
         val m = b.nearbyMessage
         if (m != null) {
-            val sent = sendNearbySafely(m.body, m.recipientId, MeshRuntime.state.value.peers, MeshRuntime::sendMessage)
-            if (sent) {
-                retried.add(m.messageId)
-            } else {
-                toast("This friend is no longer nearby. Your private message was not resent.")
-            }
+            if (sendNearbySafely(m.body, m.recipientId, MeshRuntime.state.value.peers, MeshRuntime::sendMessage)) retried.add(m.messageId)
         } else {
             toast("Couldn't send. Check your relays in Settings, then send it again.")
         }
@@ -280,23 +322,50 @@ internal fun RelayChatScreen(
                     state = listState,
                     modifier = Modifier.fillMaxSize().testTag("relay-message-list"),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     items(rows, key = { row ->
                         when (row) {
                             is ThreadRow.Day -> row.key
                             is ThreadRow.Message -> row.bubble.id
+                            is ThreadRow.Attachment -> "att-${row.file.id}"
                         }
                     }) { row ->
                         when (row) {
-                            is ThreadRow.Day -> Text(
-                                text = row.label,
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                color = RelayColors.TextSecondary,
-                                fontSize = 12.sp,
-                                textAlign = TextAlign.Center
-                            )
-                            is ThreadRow.Message -> MessageBubbleView(
+                            is ThreadRow.Day -> Box(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(RelayColors.Card)
+                                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                                ) {
+                                    Text(text = row.label, color = RelayColors.TextSecondary, fontSize = 12.sp)
+                                }
+                            }
+                            is ThreadRow.Attachment -> Box(
+                                modifier = Modifier.padding(top = if (row.bigGapBefore) 8.dp else 0.dp)
+                            ) {
+                                if (galleryEligible(row.file)) {
+                                    MediaBubble(row.file, attachmentUi.previews[row.file.id]?.bitmap,
+                                        attachmentUi.previews[row.file.id]?.kind, attachmentUi.labels[row.file.id],
+                                        mine = row.mine,
+                                        onView = {
+                                            attachmentModel.openViewer(
+                                                transferFiles.filter { galleryEligible(it) }.indexOfFirst { it.id == row.file.id })
+                                        })
+                                } else {
+                                    TransferSummaryRow(row.file, attachmentUi.previews[row.file.id]?.kind,
+                                        attachmentUi.labels[row.file.id],
+                                        onOpen = { attachmentModel.openDetail(row.file.id.toString()) })
+                                }
+                            }
+                            is ThreadRow.Message -> Box(
+                                modifier = Modifier.padding(top = if (row.bigGapBefore) 8.dp else 0.dp)
+                            ) {
+                                MessageBubbleView(
                                 b = row.bubble,
                                 nearby = info.nearby,
                                 showStatus = row.bubble.failed || row.bubble.id == lastMineId,
@@ -316,7 +385,8 @@ internal fun RelayChatScreen(
                                         toast("Message deleted")
                                     }
                                 }
-                            )
+                                )
+                            }
                         }
                     }
                 }
@@ -359,7 +429,7 @@ private fun ChatTopBar(
         )
     }
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         IconButton(onClick = back) { RIcon(R.drawable.relay_back, "Back to Chats", tint = RelayColors.TextPrimary) }
@@ -371,9 +441,9 @@ private fun ChatTopBar(
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            ConversationAvatar(info, 38)
-            Spacer(Modifier.width(10.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            ConversationAvatar(info, 34)
+            Spacer(Modifier.width(8.dp))
+            Column {
                 Text(info.title, color = RelayColors.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(info.linkText, color = RelayColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -468,10 +538,18 @@ private fun MessageBubbleView(
                 fontWeight = FontWeight.SemiBold
             )
         }
+        // Rounded rectangle; bubbles that start a same-sender run also get a sharp
+        // upper corner on the sender's side, echoing the reference client's tail.
+        val bubbleShape = when {
+            b.mine && b.runStart -> RoundedCornerShape(topStart = 16.dp, topEnd = 4.dp, bottomEnd = 16.dp, bottomStart = 16.dp)
+            b.mine -> RoundedCornerShape(16.dp)
+            b.runStart -> RoundedCornerShape(topStart = 4.dp, topEnd = 16.dp, bottomEnd = 16.dp, bottomStart = 16.dp)
+            else -> RoundedCornerShape(16.dp)
+        }
         Box(
             modifier = Modifier
                 .widthIn(max = 280.dp)
-                .clip(RoundedCornerShape(18.dp))
+                .clip(bubbleShape)
                 .background(
                     when {
                         !b.mine -> RelayColors.CardHigh
@@ -480,24 +558,14 @@ private fun MessageBubbleView(
                     }
                 )
                 .combinedClickable(onClick = { if (b.failed) onRetry() }, onLongClick = { menu = true })
-                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .padding(horizontal = 12.dp, vertical = 7.dp)
         ) {
-            Text(b.body, color = RelayColors.TextPrimary, fontSize = 15.sp)
+            BubbleBody(b, pinned)
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text("Copy") }, onClick = { menu = false; onCopy() })
                 DropdownMenuItem(text = { Text(if (pinned) "Unpin message" else "Pin message") }, onClick = { menu = false; onTogglePin() })
                 DropdownMenuItem(text = { Text("Delete", color = RelayColors.Red) }, onClick = { menu = false; confirmDelete = true })
             }
-        }
-        Row(
-            modifier = Modifier.padding(top = 4.dp, start = 4.dp, end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            if (pinned) RIcon(R.drawable.relay_pin, "Pinned message", tint = RelayColors.TextMuted, size = 12.dp)
-            if (b.atMs > 0) Text(clockTime(b.atMs), color = RelayColors.TextMuted, fontSize = 11.sp)
-            if (b.ticks == 2) RIcon(R.drawable.relay_check_double, "Delivered", tint = RelayColors.Bluetooth, size = 15.dp)
-            if (b.ticks == 1) RIcon(R.drawable.relay_check, "Sent", tint = RelayColors.TextSecondary, size = 15.dp)
         }
         if (showStatus && b.status != null) {
             val icon = when {
@@ -530,6 +598,103 @@ private fun MessageBubbleView(
     }
 }
 
+/**
+ * Message text with the time/ticks tucked beside the last text line when that line
+ * has room, otherwise on a line of its own at the bubble's lower right - the
+ * reference client's behavior. Measured synchronously so there is no second frame.
+ */
+@Composable
+private fun BubbleBody(b: BubbleUi, pinned: Boolean) {
+    val measurer = rememberTextMeasurer()
+    val bodyStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 15.sp)
+    Layout(content = {
+        Text(b.body, style = bodyStyle)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            val metaColor = if (b.mine) Color.White.copy(alpha = 0.8f) else RelayColors.TextMuted
+            if (pinned) RIcon(R.drawable.relay_pin, "Pinned message", tint = metaColor, size = 11.dp)
+            if (b.atMs > 0) Text(clockTime(b.atMs), color = metaColor, fontSize = 11.sp)
+            if (b.ticks == 2) RIcon(R.drawable.relay_check_double, "Delivered", tint = metaColor, size = 13.dp)
+            if (b.ticks == 1) RIcon(R.drawable.relay_check, "Sent", tint = metaColor, size = 13.dp)
+        }
+    }) { measurables, constraints ->
+        val meta = measurables[1].measure(Constraints(maxWidth = constraints.maxWidth))
+        val gapPx = 6.dp.roundToPx()
+        val belowGapPx = 2.dp.roundToPx()
+        val result = if (b.body.isBlank()) null
+            else measurer.measure(AnnotatedString(b.body), style = bodyStyle, constraints = constraints)
+        val lastLine = (result?.lineCount ?: 0) - 1
+        val plan = planBubbleLayout(
+            lineCount = result?.lineCount ?: 0,
+            textBlockWidth = result?.size?.width ?: 0,
+            textBlockHeight = result?.size?.height ?: 0,
+            lastLineRight = if (lastLine >= 0) result!!.getLineRight(lastLine) else 0f,
+            lastLineTop = if (lastLine >= 0) result!!.getLineTop(lastLine) else 0f,
+            lastLineBottom = if (lastLine >= 0) result!!.getLineBottom(lastLine) else 0f,
+            metaWidth = meta.width,
+            metaHeight = meta.height,
+            minWidth = constraints.minWidth,
+            maxWidth = constraints.maxWidth,
+            maxHeight = if (constraints.hasBoundedHeight) constraints.maxHeight else Int.MAX_VALUE,
+            gapPx = gapPx,
+            belowGapPx = belowGapPx
+        )
+        val text = measurables[0].measure(Constraints.fixedWidth(plan.textWidth))
+        layout(plan.width, plan.height) {
+            text.place(0, 0)
+            meta.place(plan.metaX, plan.metaY)
+        }
+    }
+}
+
+/** Where the bubble's text block and time/ticks row land. Pure so it is JVM-testable. */
+internal data class BubbleLayoutPlan(
+    val width: Int,
+    val height: Int,
+    val textWidth: Int,
+    val metaX: Int,
+    val metaY: Int,
+    val inline: Boolean
+)
+
+internal fun planBubbleLayout(
+    lineCount: Int,
+    textBlockWidth: Int,
+    textBlockHeight: Int,
+    lastLineRight: Float,
+    lastLineTop: Float,
+    lastLineBottom: Float,
+    metaWidth: Int,
+    metaHeight: Int,
+    minWidth: Int,
+    maxWidth: Int,
+    maxHeight: Int,
+    gapPx: Int,
+    belowGapPx: Int
+): BubbleLayoutPlan {
+    val textWidth = textBlockWidth.coerceAtMost(maxWidth)
+    if (lineCount == 0) {
+        // Nothing to align against: stack the meta under the text, right-aligned.
+        val width = maxOf(textWidth, metaWidth).coerceIn(minWidth, maxWidth)
+        val height = (textBlockHeight + belowGapPx + metaHeight).coerceAtMost(maxHeight)
+        return BubbleLayoutPlan(width, height, textWidth,
+            metaX = (width - metaWidth).coerceAtLeast(0),
+            metaY = (textBlockHeight + belowGapPx).coerceIn(0, (height - metaHeight).coerceAtLeast(0)),
+            inline = false)
+    }
+    val inline = lastLineRight + gapPx + metaWidth <= maxWidth
+    val width = maxOf(
+        textWidth,
+        if (inline) (lastLineRight + gapPx + metaWidth).toInt() else metaWidth
+    ).coerceIn(minWidth, maxWidth)
+    val height = (if (inline) textBlockHeight else textBlockHeight + belowGapPx + metaHeight).coerceAtMost(maxHeight)
+    val maxY = (height - metaHeight).coerceAtLeast(0)
+    val metaY = if (inline)
+        (lastLineTop + (lastLineBottom - lastLineTop - metaHeight) / 2f).toInt().coerceIn(0, maxY)
+    else
+        (textBlockHeight + belowGapPx).coerceIn(0, maxY)
+    return BubbleLayoutPlan(width, height, textWidth, (width - metaWidth).coerceAtLeast(0), metaY, inline)
+}
+
 @Composable
 private fun Composer(
     draft: String,
@@ -548,32 +713,31 @@ private fun Composer(
     ) {
         Box(
             modifier = Modifier
-                .size(42.dp)
-                .clip(CircleShape)
-                .background(RelayColors.CardHigh)
-                .clickable(onClick = onPlus),
-            contentAlignment = Alignment.Center
-        ) {
-            RIcon(R.drawable.relay_plus, "Add attachment", tint = RelayColors.TextPrimary, size = 22.dp)
-        }
-        Spacer(Modifier.width(10.dp))
-        Box(
-            modifier = Modifier
                 .weight(1f)
                 .clip(RoundedCornerShape(22.dp))
                 .background(RelayColors.Card)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            contentAlignment = Alignment.CenterStart
+                .padding(horizontal = 12.dp, vertical = 12.dp)
         ) {
-            if (draft.isEmpty()) Text("Message…", color = RelayColors.TextMuted, fontSize = 15.sp)
-            BasicTextField(
-                value = draft,
-                onValueChange = onDraft,
-                maxLines = 5,
-                textStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 15.sp),
-                cursorBrush = SolidColor(RelayColors.Blue),
-                modifier = Modifier.fillMaxWidth()
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier.size(28.dp).clickable(onClick = onPlus),
+                    contentAlignment = Alignment.Center
+                ) {
+                    RIcon(R.drawable.relay_plus, "Add attachment", tint = RelayColors.TextSecondary, size = 22.dp)
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                    if (draft.isEmpty()) Text("Message…", color = RelayColors.TextMuted, fontSize = 15.sp)
+                    BasicTextField(
+                        value = draft,
+                        onValueChange = onDraft,
+                        maxLines = 5,
+                        textStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 15.sp),
+                        cursorBrush = SolidColor(RelayColors.Blue),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
         }
         Spacer(Modifier.width(10.dp))
         Box(

@@ -37,7 +37,13 @@ object MeshRuntime {
     private lateinit var identityManager: IdentityManager
     private lateinit var readinessChecker: BluetoothReadinessChecker
     private lateinit var peerManager: PeerManager
+    private lateinit var nicknameStore: PeerNicknameStore
     private lateinit var messageStore: MessageStore
+    private lateinit var requestsStore: NearbyRequestsStore
+    /** Signed control messages (e.g. request_accept) awaiting a route, retried with the queue. */
+    private val pendingControls = LinkedHashMap<String, String>()
+    private val _pendingRequests = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val pendingRequests: StateFlow<Map<String, Long>> = _pendingRequests
 
     @Volatile private var localIdentity: LocalIdentity? = null
     private val fileDispatcher = Dispatchers.IO.limitedParallelism(1)
@@ -81,8 +87,16 @@ object MeshRuntime {
         identityManager = IdentityManager(appContext)
         readinessChecker = BluetoothReadinessChecker(appContext)
         peerManager = PeerManager()
+        nicknameStore = PeerNicknameStore(appContext)
+        if (nicknameStore.storageError) addError("Saved nearby names are unavailable; live names will be kept for this session.")
+        scope.launch { nicknameStore.names.collect { publishState() } }
         messageStore = MessageStore(appContext)
         if (messageStore.storageError) addError("Nearby history is unavailable; existing data was preserved.")
+        requestsStore = NearbyRequestsStore(appContext)
+        requestsStore.seedAccepted(messageStore.knownPeerIds())
+        // Accepted requests whose signed accept never reached the mesh keep retrying after restarts.
+        requestsStore.acceptOutbox.value.forEach { pendingControls["$it:request_accept"] = it }
+        scope.launch { requestsStore.pending.collect { _pendingRequests.value = it } }
         scope.launch {
             peerManager.peers.collect { publishState() }
         }
@@ -116,7 +130,7 @@ object MeshRuntime {
         transport = BleTransport(
             context = appContext,
             onPacket = { packet -> scope.launch { processTransportPacket(packet) } },
-            onLinkReady = { scope.launch { sendAnnouncement() } },
+            onLinkReady = { scope.launch { sendAnnouncement(); flushQueued() } },
             onError = ::addError,
             onLinkLost = {
                 peerManager.linkLost(it)
@@ -131,6 +145,7 @@ object MeshRuntime {
                 delay(30_000)
                 peerManager.expire()
                 sendAnnouncement()
+                flushQueued()
             }
         }
     }
@@ -171,22 +186,79 @@ object MeshRuntime {
             return@launch
         }
         val identity = localIdentity ?: return@launch
-        val peer = peerId?.let { peerManager.get(it) }
-        if (peerId != null && peer == null) {
-            addError("Unknown Nearby recipient; message was not sent.")
-            return@launch
-        }
-        val privateMessage = peer != null
-        val message = runCatching { messageStore.createOutbound(identity.peerId, peerId, body, privateMessage) }
+        // Out-of-range friends are queued, never blocked and never sent to the public group.
+        val message = runCatching { messageStore.createOutbound(identity.peerId, peerId, body, peerId != null) }
             .getOrElse { addError("Nearby history is unavailable; existing data was preserved."); return@launch }
+        // Starting a chat ourselves means it belongs in our own chat list.
+        if (peerId != null && ::requestsStore.isInitialized) requestsStore.accept(peerId)
+        dispatchOutbound(message)
+    }
+
+    /** Accept an incoming chat request: the chat joins the list and they get a signed accept. */
+    fun acceptRequest(peerId: String) = scope.launch {
+        if (!::requestsStore.isInitialized) return@launch
+        requestsStore.accept(peerId, notifyPeer = true)
+        pendingControls["$peerId:request_accept"] = peerId
+        sendControl(peerId, "request_accept")
+    }
+
+    /** Decline a request: it leaves the list along with its messages on this phone only. */
+    fun declineRequest(peerId: String) = scope.launch {
+        if (!::requestsStore.isInitialized) return@launch
+        requestsStore.decline(peerId)
+        deleteConversation(peerId)
+    }
+
+    private fun sendControl(peerId: String, kind: String): Boolean {
+        val identity = localIdentity ?: return false
+        val payload = JSONObject().put("kind", kind).toString().encodeToByteArray()
+        val packet = runCatching {
+            PacketCodec.createSigned(PacketType.CONTROL, identity.peerId, peerId, payload, identity.signingPrivateKey)
+        }.getOrNull() ?: return false
+        val accepted = runCatching { transport?.send(PacketCodec.encode(packet)) == true }.getOrDefault(false)
+        if (accepted) {
+            pendingControls.remove("$peerId:$kind")
+            if (kind == "request_accept" && ::requestsStore.isInitialized) requestsStore.acceptDispatched(peerId)
+        }
+        return accepted
+    }
+
+    private fun handleControl(decoded: MeshPacket) {
+        val json = runCatching { JSONObject(decoded.payload.decodeToString()) }.getOrNull() ?: return
+        if (decoded.recipientId != localIdentity?.peerId) return
+        if (json.optString("kind") != "request_accept" || !::requestsStore.isInitialized) return
+        val sender = peerManager.get(decoded.senderId)
+        if (requestsStore.markAcceptedBy(decoded.senderId)) {
+            val local = localIdentity ?: return
+            `in`.yashd.bitchat.notifications.MessageNotifications.stored(
+                appContext,
+                `in`.yashd.bitchat.ui.relay.MutedChatsStore.key("nearby", local.peerId, decoded.senderId),
+                `in`.yashd.bitchat.nearbyRoute(decoded.senderId),
+                sender?.identity?.displayName.orEmpty(),
+                "Accepted your chat request"
+            )
+        }
+    }
+
+    /**
+     * Tries one dispatch of a queued message. Returns false (message stays Pending) when no
+     * link accepted it or the recipient's keys are not known yet; their next announcement
+     * supplies the keys and the flush retries. Runs only on the main scope, so a queued
+     * message is never dispatched twice at once.
+     */
+    private fun dispatchOutbound(message: ChatMessage): Boolean {
+        val identity = localIdentity ?: return false
+        if (message.direction != MessageDirection.Outbound || message.status != MessageStatus.Pending) return false
+        val peer = message.recipientId?.let { peerManager.get(it) }
+        if (message.isPrivate && peer == null) return false
         val payload = JSONObject()
             .put("messageId", message.messageId)
             .put("createdAtMs", message.createdAtMs)
-            .put("body", body)
+            .put("body", message.body)
             .toString()
             .encodeToByteArray()
-        val type = if (privateMessage) PacketType.ENCRYPTED else PacketType.MESSAGE
-        val finalPayload = if (privateMessage) {
+        val type = if (message.isPrivate) PacketType.ENCRYPTED else PacketType.MESSAGE
+        val finalPayload = if (message.isPrivate) {
             runCatching {
                 cryptoBox.encrypt(
                     localPrivateKey = identity.encryptionPrivateKey,
@@ -196,26 +268,38 @@ object MeshRuntime {
             }.getOrElse {
                 messageStore.updateStatus(message.messageId, null, MessageStatus.Failed)
                 addError("Couldn't send this private message. Reconnect and try again.")
-                return@launch
+                return false
             }
         } else {
             payload
         }
         val packet = runCatching {
-            PacketCodec.createSigned(type, identity.peerId, peerId, finalPayload, identity.signingPrivateKey)
+            PacketCodec.createSigned(type, identity.peerId, message.recipientId, finalPayload, identity.signingPrivateKey)
         }.getOrElse {
             messageStore.updateStatus(message.messageId, null, MessageStatus.Failed)
             addError("Couldn't send this message. Try a shorter message or reconnect.")
-            return@launch
+            return false
         }
-        val accepted = runCatching { transport?.send(PacketCodec.encode(packet)) == true }
-            .onFailure { addError("Nearby send failed.") }.getOrDefault(false)
-        messageStore.updateStatus(
-            message.messageId,
-            packet.packetId.toHex(),
-            if (accepted) MessageStatus.SentToTransport else MessageStatus.Failed
-        )
-        if (!accepted) addError("No Nearby link accepted the message. Turn on Nearby and retry.")
+        val accepted = runCatching { transport?.send(PacketCodec.encode(packet)) == true }.getOrDefault(false)
+        if (accepted) messageStore.updateStatus(message.messageId, packet.packetId.toHex(), MessageStatus.SentToTransport)
+        return accepted
+    }
+
+    /** Pull-to-refresh: re-check Bluetooth, re-announce and retry queued messages. */
+    fun refreshNow() = scope.launch {
+        if (!::appContext.isInitialized) return@launch
+        refreshReadiness()
+        sendAnnouncement()
+        flushQueued()
+    }
+
+    /** Retries every queued message: on new links, on announcements and on the announce tick. */
+    fun flushQueued() = scope.launch {
+        if (!::messageStore.isInitialized) return@launch
+        messageStore.pendingOutbound().forEach { dispatchOutbound(it) }
+        pendingControls.entries.toList().forEach { (key, peerId) ->
+            sendControl(peerId, key.substringAfter(':'))
+        }
     }
 
     /** Original Stage 2A service APIs; Stage 2B UI uses the result-bearing APIs below.
@@ -365,10 +449,15 @@ object MeshRuntime {
             return
         }
         when (decoded.type) {
-            PacketType.ANNOUNCE -> peerManager.upsertAnnouncement(announcedIdentity!!, packet.linkId, null, decoded.ttl == 5)
+            PacketType.ANNOUNCE -> {
+                peerManager.upsertAnnouncement(announcedIdentity!!, packet.linkId, null, decoded.ttl == 5)
+                if (::nicknameStore.isInitialized) nicknameStore.remember(announcedIdentity!!.peerId, announcedIdentity!!.displayName)
+                flushQueued()
+            }
             PacketType.MESSAGE -> handleMessage(decoded, encrypted = false)
             PacketType.ENCRYPTED -> handleMessage(decoded, encrypted = true)
             PacketType.ACK -> handleAck(decoded)
+            PacketType.CONTROL -> handleControl(decoded)
             PacketType.PING -> sendSimple(PacketType.PONG, decoded.senderId, ByteArray(0))
             else -> Unit
         }
@@ -396,12 +485,21 @@ object MeshRuntime {
             senderId = decoded.senderId,
             recipientId = decoded.recipientId,
             body = json.optString("body"),
-            isPrivate = encrypted
+            isPrivate = encrypted,
+            senderMessageId = json.optString("messageId").takeIf { it.isNotBlank() }
         ) }.getOrElse { addError("Nearby history is unavailable; existing data was preserved."); return }
         val notificationNow = System.currentTimeMillis()
         notificationPackets.entries.removeAll { it.value < notificationNow - 10 * 60_000 }
         val firstReceipt = notificationPackets.put(decoded.packetId.toHex(), decoded.timestampMs) == null
-        if (inserted && firstReceipt && `in`.yashd.bitchat.notifications.NotificationPolicy.isLive(decoded.timestampMs, receiveStartedAt, System.currentTimeMillis())) {
+        val live = `in`.yashd.bitchat.notifications.NotificationPolicy.isLive(decoded.timestampMs, receiveStartedAt, System.currentTimeMillis())
+        // Private messages from someone new wait in Requests instead of alerting as a chat.
+        if (encrypted && ::requestsStore.isInitialized && !requestsStore.isAccepted(decoded.senderId)) {
+            if (requestsStore.addPending(decoded.senderId, notificationNow) && live) {
+                val key = `in`.yashd.bitchat.ui.relay.MutedChatsStore.key("nearby", local.peerId, decoded.senderId)
+                `in`.yashd.bitchat.notifications.MessageNotifications.stored(appContext, key, "requests",
+                    sender?.identity?.displayName.orEmpty(), "Wants to message you")
+            }
+        } else if (inserted && firstReceipt && live) {
             val route = `in`.yashd.bitchat.nearbyRoute(if (encrypted) decoded.senderId else null)
             val key = `in`.yashd.bitchat.ui.relay.MutedChatsStore.key("nearby", local.peerId, if (encrypted) decoded.senderId else null)
             `in`.yashd.bitchat.notifications.MessageNotifications.stored(appContext, key, route,
@@ -413,7 +511,7 @@ object MeshRuntime {
     private fun handleAck(decoded: MeshPacket) {
         val json = runCatching { JSONObject(decoded.payload.decodeToString()) }.getOrNull() ?: return
         if (decoded.recipientId != localIdentity?.peerId) return
-        runCatching { messageStore.markPacketDelivered(json.optString("ackedPacketId"), decoded.senderId) }
+        runCatching { messageStore.markPacketDelivered(json.optString("ackedPacketId"), decoded.senderId, 5 - decoded.ttl) }
             .onFailure { addError("Nearby history is unavailable; existing data was preserved.") }
     }
 
@@ -468,6 +566,7 @@ object MeshRuntime {
             bluetoothReadiness = readiness,
             serviceRunning = serviceRunning,
             peers = if (::peerManager.isInitialized) peerManager.peers.value else emptyList(),
+            knownNames = if (::nicknameStore.isInitialized) nicknameStore.names.value else emptyMap(),
             currentConversation = if (::messageStore.isInitialized) messageStore.conversation.value else emptyList(),
             errors = _state.value.errors
         )

@@ -31,6 +31,7 @@ class RelayViewModel private constructor(val runtime: InternetRuntime, private v
     fun retrySetup() = runtime.retrySetup()
     suspend fun addInternetConversation(npub: String, displayName: String) = runtime.addInternetConversation(npub, displayName)
     fun announce() = runtime.announce()
+    fun refresh() = runtime.refresh()
     fun send(npub: String, body: String) = runtime.send(npub, body)
     override fun onCleared() { if (ownsRuntime) runtime.close() }
     companion object {

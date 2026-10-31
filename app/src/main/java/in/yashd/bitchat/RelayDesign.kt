@@ -152,6 +152,18 @@ internal fun PersonAvatar(name: String, size: Dp, modifier: Modifier = Modifier)
     )
 }
 
+/** Shared compact type scale; the chat list is the reference. */
+internal object RelayType {
+    val ScreenTitle = 24.sp
+    val SubTitle = 17.sp
+    val RowTitle = 16.sp
+    val Body = 15.sp
+    val Label = 14.sp
+    val Secondary = 13.sp
+    val Meta = 12.sp
+    val Caption = 11.sp
+}
+
 /** Big title on the left ("Relay" / "Settings") and your own avatar on the right. */
 @Composable
 internal fun RelayHeader(title: String, myName: String, onAvatar: () -> Unit) {
@@ -163,8 +175,8 @@ internal fun RelayHeader(title: String, myName: String, onAvatar: () -> Unit) {
             text = title,
             modifier = Modifier.weight(1f),
             color = RelayColors.TextPrimary,
-            fontSize = 30.sp,
-            fontWeight = FontWeight.Bold
+            fontSize = RelayType.ScreenTitle,
+            fontWeight = FontWeight.SemiBold
         )
         PersonAvatar(
             name = myName.ifBlank { "Me" },
@@ -222,7 +234,7 @@ internal fun RelayPill(text: String, color: Color, background: Color) {
             .background(background)
             .padding(horizontal = 10.dp, vertical = 4.dp)
     ) {
-        Text(text, color = color, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Text(text, color = color, fontSize = RelayType.Meta, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -247,9 +259,9 @@ internal fun RelayListRow(
         RIcon(icon, null, tint = iconTint, size = 22.dp)
         Spacer(Modifier.width(18.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(title, color = RelayColors.TextPrimary, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, color = RelayColors.TextPrimary, fontSize = RelayType.Body, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle != null) {
-                Text(subtitle, color = RelayColors.TextSecondary, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, color = RelayColors.TextSecondary, fontSize = RelayType.Meta, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
         if (trailing != null) {
@@ -268,7 +280,7 @@ internal fun RelayListRow(
 internal fun DotLabel(text: String, color: Color) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         StatusDot(color, 7.dp)
-        Text(text, color = color, fontSize = 13.sp)
+        Text(text, color = color, fontSize = RelayType.Secondary)
     }
 }
 
@@ -282,8 +294,8 @@ internal fun EmptyCard(@DrawableRes icon: Int, title: String, body: String, acti
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             RIcon(icon, null, tint = RelayColors.TextSecondary, size = 30.dp)
-            Text(title, color = RelayColors.TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            Text(body, color = RelayColors.TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
+            Text(title, color = RelayColors.TextPrimary, fontSize = RelayType.RowTitle, fontWeight = FontWeight.SemiBold)
+            Text(body, color = RelayColors.TextSecondary, fontSize = RelayType.Secondary, textAlign = TextAlign.Center)
             if (action != null) action()
         }
     }

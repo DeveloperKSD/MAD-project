@@ -32,9 +32,10 @@ fun filterConversations(rows: List<RelayConversation>, filter: ConversationFilte
     (filter == ConversationFilter.All || it.transport.name == filter.name) &&
         (it.title.contains(search.trim(), true) || it.preview.contains(search.trim(), true) || it.recipient.orEmpty().contains(search.trim(), true))
 }
-/** The nullable recipient is reserved for a deliberately selected public Nearby group. */
+/** The nullable recipient is reserved for a deliberately selected public Nearby group.
+ * Offline or out-of-range friends are queued by the runtime, never sent to the group. */
 fun sendNearbySafely(body: String, peerId: String?, peers: List<PeerState>, send: (String, String?) -> Unit): Boolean {
-    if (body.isBlank() || peerId != null && peers.none { it.identity.peerId == peerId && it.state != PeerConnectionState.Disconnected }) return false
+    if (body.isBlank()) return false
     send(body, peerId)
     return true
 }

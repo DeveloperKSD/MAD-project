@@ -2,7 +2,7 @@ package `in`.yashd.bitchat.data.internet
 
 import `in`.yashd.bitchat.nostr.NostrMessagingCoordinator
 
-enum class HistoryStatus { QUEUED, RELAY_ACCEPTED, RELAY_REJECTED, FAILED, UNKNOWN, RECEIVED, SENDER_COPY_RECEIVED, DELETED }
+enum class HistoryStatus { QUEUED, RELAY_ACCEPTED, RELAY_REJECTED, FAILED, UNKNOWN, RECEIVED, SENDER_COPY_RECEIVED, DELIVERED, DELETED }
 data class SavedContact(val peer: String, val name: String, val lastMessageAtMs: Long? = null)
 data class SavedMessage(val recordId: String, val rumorId: String?, val peer: String, val body: String,
     val outgoing: Boolean, val createdAtMs: Long, val status: HistoryStatus)
@@ -27,6 +27,9 @@ interface InternetHistoryRepository {
     suspend fun bindRumor(owner: String, id: String, rumorId: String)
     suspend fun received(owner: String, rumorId: String, peer: String, body: String, outgoing: Boolean, time: Long)
     suspend fun publication(owner: String, id: String, result: NostrMessagingCoordinator.SendResult)
+    /** Marks a sent message delivered when the authenticated recipient's receipt arrives.
+     * Never downgrades an already-delivered or terminal state, never resurrects deleted rows. */
+    suspend fun markDelivered(owner: String, rumorId: String, peer: String): Boolean
     suspend fun failed(owner: String, id: String, unknown: Boolean)
     suspend fun interruptPending(owner: String)
     /** Local-only delete. Keeps an empty tombstone so relays that redeliver the message cannot bring it back. */
@@ -38,6 +41,7 @@ interface InternetHistoryRepository {
 fun HistoryStatus.label(): String = when (this) {
     HistoryStatus.QUEUED -> "Sending…"
     HistoryStatus.RELAY_ACCEPTED -> "Relay accepted · delivery unconfirmed"
+    HistoryStatus.DELIVERED -> "Delivered"
     HistoryStatus.RELAY_REJECTED -> "Failed · recipient relays rejected the message"
     HistoryStatus.FAILED -> "Failed · no recipient relay accepted"
     HistoryStatus.UNKNOWN -> "Outcome unknown · delivery unconfirmed"

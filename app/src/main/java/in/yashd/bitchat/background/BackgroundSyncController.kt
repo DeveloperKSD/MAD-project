@@ -32,7 +32,8 @@ data class BackgroundSyncStatus(val enabled: Boolean = false, val text: String =
 data class BackgroundSyncTicket(val decision: BackgroundSyncDecision, val saved: SavedSyncConfiguration)
 
 /** Reconciled on app launch and before EVERY worker. KEEP preserves the existing periodic
- * schedule over repeated launches/upgrades. Changed configuration needs a fresh explicit opt-in.
+ * schedule over repeated launches/upgrades. A valid saved configuration enables sync by default;
+ * configuration changes re-bind automatically on the next reconcile.
  */
 class BackgroundSyncController(
     private val store: BackgroundSyncStore,
@@ -63,19 +64,35 @@ class BackgroundSyncController(
         } ?: false
     }
 
+    /** Background sync is on by default whenever a valid saved configuration exists;
+     * configuration changes re-bind automatically on the next reconcile. */
     private suspend fun reconcileLocked(): BackgroundSyncTicket? {
         val decision = store.read()
-        if (!decision.enabled) {
-            scheduler.cancel()
-            mutable.value = BackgroundSyncStatus()
-            return null
-        }
         val saved = loadSaved()
-        if (saved == null || saved.binding() != decision.binding) {
+        if (!decision.enabled) {
+            if (saved == null) {
+                scheduler.cancel()
+                mutable.value = BackgroundSyncStatus()
+                return null
+            }
+            val fresh = BackgroundSyncDecision(true, saved.binding(), UUID.randomUUID().toString())
+            store.write(fresh)
+            scheduler.ensureScheduled()
+            mutable.value = BackgroundSyncStatus(true, "On", fresh.lastSuccessSeconds)
+            return BackgroundSyncTicket(fresh, saved)
+        }
+        if (saved == null) {
             cancelRunning()
             scheduler.cancel()
-            mutable.value = BackgroundSyncStatus(true, "Paused · finish Internet Setup, then switch off and on again")
+            mutable.value = BackgroundSyncStatus(true, "Paused · finish Internet Setup")
             return null
+        }
+        if (saved.binding() != decision.binding) {
+            val fresh = decision.copy(binding = saved.binding(), approval = UUID.randomUUID().toString())
+            store.write(fresh)
+            scheduler.ensureScheduled()
+            mutable.value = BackgroundSyncStatus(true, "On", fresh.lastSuccessSeconds)
+            return BackgroundSyncTicket(fresh, saved)
         }
         scheduler.ensureScheduled()
         mutable.value = BackgroundSyncStatus(true, "Enabled · checks may be delayed", decision.lastSuccessSeconds)

@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,11 +24,20 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.activity.compose.rememberLauncherForActivityResult
+import `in`.yashd.bitchat.attachments.transferDisplayName
+import androidx.lifecycle.ViewModelProvider
+import `in`.yashd.bitchat.attachments.NearbyAttachmentModel
+import `in`.yashd.bitchat.mesh.MeshRuntime
+import `in`.yashd.bitchat.attachments.galleryEligible
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
@@ -109,6 +119,14 @@ internal fun RelayContactScreen(
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = back) { RIcon(R.drawable.relay_back, "Back", tint = RelayColors.TextPrimary) }
             Spacer(Modifier.weight(1f))
+            IconButton(onClick = toggleFavorite) {
+                RIcon(
+                    if (favorite) R.drawable.relay_star_filled else R.drawable.relay_star,
+                    if (favorite) "Remove ${info.title} from favorites" else "Add ${info.title} to favorites",
+                    tint = if (favorite) RelayColors.Orange else RelayColors.TextPrimary,
+                    size = 22.dp
+                )
+            }
             Box {
                 IconButton(onClick = { menu = true }) { RIcon(R.drawable.relay_more, "More options", tint = RelayColors.TextPrimary, size = 20.dp) }
                 ContactMenu(menu, { menu = false }, favorite, toggleFavorite, copyId, toast)
@@ -119,7 +137,7 @@ internal fun RelayContactScreen(
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
             ConversationAvatar(info, 84)
             Spacer(Modifier.height(14.dp))
-            Text(info.title, color = RelayColors.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+            Text(info.title, color = RelayColors.TextPrimary, fontSize = RelayType.ScreenTitle, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
             Spacer(Modifier.height(4.dp))
             Text(statusText, color = if (info.online) RelayColors.Green else RelayColors.TextSecondary, fontSize = 14.sp)
         }
@@ -200,26 +218,80 @@ internal fun RelayContactScreen(
 
             Spacer(Modifier.height(12.dp))
             SectionTitle("Shared media")
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                repeat(3) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .aspectRatio(1f)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(RelayColors.Card),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        RIcon(R.drawable.relay_image, null, tint = RelayColors.TextMuted, size = 26.dp)
+            if (info.nearby && info.target != null) {
+                val attachmentModel = remember(context) { ViewModelProvider(context.activity())[NearbyAttachmentModel::class.java] }
+                val attachmentUi by attachmentModel.state.collectAsState()
+                val allTransfers by MeshRuntime.fileTransfers.collectAsState()
+                val media = allTransfers.filter { it.peer == info.target && galleryEligible(it) }
+                var viewerStart by remember { mutableStateOf(-1) }
+                LaunchedEffect(media.map { it.id }) {
+                    media.filter { attachmentUi.previews[it.id] == null }.forEach { attachmentModel.quietPreview(it) }
+                }
+                var saveId by remember { mutableStateOf<String?>(null) }
+                var saveExt by remember { mutableStateOf("pdf") }
+                val saveLauncher = rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+                    val id = saveId; saveId = null
+                    if (uri != null && id != null) attachmentModel.save(uri, java.util.UUID.fromString(id))
+                }
+                val images = media.filter { attachmentUi.previews[it.id]?.bitmap != null }
+                val documents = media.filter { attachmentUi.previews[it.id]?.kind == `in`.yashd.bitchat.attachments.AttachmentKind.PDF }
+                if (images.isEmpty() && documents.isEmpty()) {
+                    Text(
+                        "Verified files you share will show up here.",
+                        modifier = Modifier.padding(top = 4.dp, start = 4.dp),
+                        color = RelayColors.TextMuted,
+                        fontSize = 12.sp
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        images.chunked(3).forEach { rowItems ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                rowItems.forEach { file ->
+                                    androidx.compose.foundation.Image(
+                                        attachmentUi.previews.getValue(file.id).bitmap!!.asImageBitmap(),
+                                        "Verified received image",
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .clickable { viewerStart = media.indexOf(file) }
+                                    )
+                                }
+                                repeat(3 - rowItems.size) { Spacer(Modifier.weight(1f)) }
+                            }
+                        }
                     }
                 }
+                documents.forEach { file ->
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(RelayColors.Card).padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RIcon(R.drawable.relay_storage, null, tint = RelayColors.TextSecondary, size = 22.dp)
+                        Spacer(Modifier.padding(6.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(transferDisplayName(file.outgoing, attachmentUi.labels[file.id], `in`.yashd.bitchat.attachments.AttachmentKind.PDF),
+                                color = RelayColors.TextPrimary, fontSize = 15.sp)
+                            Text("PDF verified. Open saved PDFs only with a trusted viewer.", color = RelayColors.TextMuted, fontSize = 12.sp)
+                        }
+                        TextButton(onClick = {
+                            saveId = file.id.toString()
+                            saveLauncher.launch("attachment-${file.id.toString().take(8)}.pdf")
+                        }) { Text("Save") }
+                    }
+                }
+                if (viewerStart >= 0) {
+                    AttachmentPagerViewer(media, attachmentUi.previews, viewerStart, attachmentModel::quietPreview) { viewerStart = -1 }
+                }
+            } else {
+                Text(
+                    "Internet attachments are not available yet.",
+                    modifier = Modifier.padding(top = 4.dp, start = 4.dp),
+                    color = RelayColors.TextMuted,
+                    fontSize = 12.sp
+                )
             }
-            Text(
-                "Photos you share will show up here.",
-                modifier = Modifier.padding(top = 8.dp, start = 4.dp),
-                color = RelayColors.TextMuted,
-                fontSize = 12.sp
-            )
 
             Spacer(Modifier.height(16.dp))
             RelayCard {

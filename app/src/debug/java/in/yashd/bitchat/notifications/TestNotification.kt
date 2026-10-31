@@ -20,7 +20,7 @@ internal fun MessageNotifications.testNotification(context: Context): String {
             !NotificationManagerCompat.from(context).areNotificationsEnabled()) return permissionHelp
         channels(context)
         if (Build.VERSION.SDK_INT >= 26 && context.getSystemService(NotificationManager::class.java)
-                .getNotificationChannel(CHANNEL)?.importance == NotificationManager.IMPORTANCE_NONE) {
+                .getNotificationChannel(activeChannel(context))?.importance == NotificationManager.IMPORTANCE_NONE) {
             return "The New messages channel is disabled. Open Android Settings → Apps → Relay → Notifications → New messages and enable it, then try again."
         }
         val intent = Intent(context, MainActivity::class.java)

@@ -17,7 +17,10 @@ class PeerManagerTest {
         assertEquals(PeerConnectionState.Authenticated, peers.get("alice")!!.state)
         peers.linkLost("relay-two")
         assertEquals(PeerConnectionState.Disconnected, peers.get("alice")!!.state)
-        assertFalse(`in`.yashd.bitchat.ui.relay.sendNearbySafely("hello", "alice", peers.peers.value) { _, _ -> fail("Disconnected peer must not send") })
+        // A disconnected friend queues privately instead of blocking or going public.
+        val targets = mutableListOf<String?>()
+        assertTrue(`in`.yashd.bitchat.ui.relay.sendNearbySafely("hello", "alice", peers.peers.value) { _, target -> targets.add(target) })
+        assertEquals(listOf("alice"), targets)
     }
 
     @Test fun routesExpireAndPeerCountIsBounded() {

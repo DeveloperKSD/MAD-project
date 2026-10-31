@@ -11,7 +11,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -29,7 +31,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -64,162 +65,6 @@ import `in`.yashd.bitchat.ui.relay.RelayUiState
 import `in`.yashd.bitchat.ui.relay.RelayViewModel
 import `in`.yashd.bitchat.ui.relay.relayConversations
 
-// ---------------------------------------------------------------------------
-// Routes: which conversation is open.
-//   "nearby:<peerId>"  private Bluetooth chat
-//   "nearby:"          the public Nearby group
-//   "internet:<npub>"  Internet (Nostr) chat
-// ---------------------------------------------------------------------------
-
-internal fun nearbyRoute(peerId: String?): String = "nearby:" + (peerId ?: "")
-internal fun internetRoute(npub: String): String = "internet:$npub"
-internal fun routeIsNearby(route: String): Boolean = route.startsWith("nearby:")
-internal fun routeTarget(route: String): String? = route.substringAfter(':').ifEmpty { null }
-
-private fun PeerState?.isLinked(): Boolean =
-    this != null && (state == PeerConnectionState.Connected || state == PeerConnectionState.Authenticated)
-
-/** Everything the screens need to show about one conversation or contact. */
-internal data class RouteInfo(
-    val route: String,
-    val nearby: Boolean,
-    val target: String?,
-    val title: String,
-    val linkText: String,
-    val online: Boolean,
-    val peer: PeerState?,
-    val publicId: String
-) {
-    val isGroup: Boolean get() = nearby && target == null
-}
-
-internal fun describeRoute(route: String, mesh: MeshUiState, internet: RelayUiState): RouteInfo {
-    val target = routeTarget(route)
-    if (routeIsNearby(route)) {
-        val peer = target?.let { id -> mesh.peers.firstOrNull { it.identity.peerId == id } }
-        val linked = mesh.serviceRunning && peer.isLinked()
-        val inRange = mesh.peers.count { it.isLinked() }
-        val title = when {
-            target == null -> "Nearby group"
-            peer != null && peer.identity.displayName.isNotBlank() -> peer.identity.displayName
-            else -> target.take(12)
-        }
-        val linkText = when {
-            target == null -> if (mesh.serviceRunning) "Public group • $inRange in range" else "Public group • Nearby is off"
-            !mesh.serviceRunning -> "Offline • Nearby is off"
-            peer == null -> "Offline • No route"
-            linked -> "BLE only • Nearby"
-            peer.state == PeerConnectionState.Connecting -> "BLE only • Connecting…"
-            peer.state == PeerConnectionState.Failed -> "BLE only • Connection failed"
-            peer.state == PeerConnectionState.Disconnected -> "Offline • No route"
-            else -> "BLE only • Found nearby"
-        }
-        return RouteInfo(
-            route = route,
-            nearby = true,
-            target = target,
-            title = title,
-            linkText = linkText,
-            online = if (target == null) mesh.serviceRunning else linked,
-            peer = peer,
-            publicId = target.orEmpty()
-        )
-    }
-    val npub = target.orEmpty()
-    val key = runCatching { RelayViewModel.recipientKey(npub) }.getOrNull()
-    val record = internet.conversations.firstOrNull { it.publicKey == key }
-    val linkText = when {
-        internet.inboxes.isEmpty() -> "Nostr only • Not set up"
-        internet.inboxesConnected -> "Nostr only • Relay connected"
-        else -> "Nostr only • Relay offline"
-    }
-    return RouteInfo(
-        route = route,
-        nearby = false,
-        target = npub,
-        title = record?.displayName?.ifBlank { null } ?: shortId(npub, 12, 6),
-        linkText = linkText,
-        online = internet.inboxesConnected,
-        peer = null,
-        publicId = npub
-    )
-}
-
-/** Messages of one Nearby conversation (same rule the old chat screen used). */
-internal fun nearbyThread(mesh: MeshUiState, peerId: String?): List<ChatMessage> =
-    mesh.currentConversation.filter { m ->
-        if (peerId == null) !m.isPrivate && m.recipientId == null
-        else m.isPrivate && (m.senderId == peerId || m.recipientId == peerId)
-    }
-
-/** Messages of one Internet conversation. */
-internal fun internetThread(internet: RelayUiState, npub: String): List<InternetMessage> {
-    val key = runCatching { RelayViewModel.recipientKey(npub) }.getOrNull() ?: return emptyList()
-    return if (internet.threadPeer == key) internet.thread else internet.messages.filter { it.peer == key }
-}
-
-/** One row of the Chats list. */
-internal data class ChatListItem(
-    val info: RouteInfo,
-    val preview: String,
-    val lastAtMs: Long?,
-    val waiting: Boolean,
-    val failed: Boolean,
-    val unread: Int
-)
-
-/**
- * Builds the Chats list from the existing conversation data (relayConversations) and adds
- * the extra details the design shows: time, connection line and unread count.
- * Unread counts only live in memory: messages that arrive after you last opened a chat.
- */
-internal fun buildChatList(
-    internet: RelayUiState,
-    mesh: MeshUiState,
-    seenAt: Map<String, Long>,
-    sessionStart: Long
-): List<ChatListItem> {
-    val names = mesh.peers.associate { it.identity.peerId to it.identity.displayName }
-    return relayConversations(internet, mesh).mapNotNull { row ->
-        val route = when (row.transport) {
-            ConversationTransport.Nearby -> nearbyRoute(row.recipient)
-            ConversationTransport.Internet -> internetRoute(row.recipient ?: return@mapNotNull null)
-        }
-        val info = describeRoute(route, mesh, internet)
-        val since = seenAt[route] ?: sessionStart
-        if (info.nearby) {
-            val thread = nearbyThread(mesh, info.target)
-            val last = thread.lastOrNull()
-            val mineLast = last?.direction == MessageDirection.Outbound
-            val preview = when {
-                last == null -> row.preview
-                info.isGroup && !mineLast -> (names[last.senderId]?.ifBlank { null } ?: last.senderId.take(8)) + ": " + last.body
-                else -> last.body
-            }
-            ChatListItem(
-                info = info,
-                preview = preview,
-                lastAtMs = last?.createdAtMs,
-                waiting = mineLast && last?.status == MessageStatus.Pending,
-                failed = mineLast && last?.status == MessageStatus.Failed,
-                unread = thread.count { it.direction == MessageDirection.Inbound && (it.receivedAtMs ?: it.createdAtMs) > since }
-            )
-        } else {
-            val thread = internetThread(internet, info.publicId)
-            val last = thread.lastOrNull()
-            val mineLast = last?.outgoing == true
-            ChatListItem(
-                info = info,
-                preview = last?.body ?: row.preview,
-                lastAtMs = last?.createdAtMs?.takeIf { it > 0 }
-                    ?: internet.conversations.firstOrNull { it.publicKey == last?.peer || it.npub == info.publicId }?.lastMessageAtMs,
-                waiting = mineLast && last?.status == "Sending…",
-                failed = mineLast && last?.status?.startsWith("Failed") == true,
-                unread = thread.count { !it.outgoing && it.createdAtMs > since }
-            )
-        }
-    }.sortedByDescending { it.lastAtMs ?: 0L }
-}
 
 // ---------------------------------------------------------------------------
 // Chats screen (Figma 1)
@@ -240,12 +85,20 @@ internal fun RelayChatsScreen(
     openChat: (String) -> Unit,
     newChat: () -> Unit,
     discover: () -> Unit,
+    newInternetChat: () -> Unit = {},
     pinned: List<String> = emptyList(),
     togglePin: (String) -> Unit = {},
     deleteChat: (String) -> Unit = {},
     refreshing: Boolean = false,
     onRefresh: () -> Unit = {},
-    toggleFavorite: (String) -> Unit = {}
+    toggleFavorite: (String) -> Unit = {},
+    requestsCount: Int = 0,
+    openRequests: () -> Unit = {},
+    lists: List<Pair<String, String>> = emptyList(),
+    listMembership: Map<String, Set<String>> = emptyMap(),
+    createList: (String) -> Unit = {},
+    toggleListMembership: (String, String) -> Unit = { _, _ -> },
+    deleteList: (String) -> Unit = {}
 ) {
     // Search text can contain private names, so it is kept in memory only.
     var search by remember { mutableStateOf("") }
@@ -254,17 +107,76 @@ internal fun RelayChatsScreen(
     val visible = items.filter { item ->
         val matches = query.isEmpty() || item.info.title.contains(query, true) ||
             item.preview.contains(query, true) || item.info.publicId.contains(query, true)
-        matches && when (filter) {
-            "Nearby" -> item.info.nearby
-            "Internet" -> !item.info.nearby
-            "Offline" -> !item.info.online
-            "Favorites" -> item.info.route in favorites
+        matches && when {
+            filter == "Nearby" -> item.info.nearby
+            filter == "Internet" -> !item.info.nearby
+            filter == "Offline" -> !item.info.online
+            filter == "Favorites" -> item.info.route in favorites
+            filter.startsWith("list:") -> filter.removePrefix("list:") in listMembership[item.info.route].orEmpty()
             else -> true
         }
     }.sortedByDescending { it.info.route in pinned } // stable: pinned chats first, newest first inside each group
-    // Which row's menu is open, and which chat is waiting for delete confirmation.
+    // Which row's menu is open, which chat is waiting for delete confirmation,
+    // whether the new-list dialog shows, and which chat's list picker is open.
     var menuRoute by remember { mutableStateOf<String?>(null) }
     var confirmRoute by remember { mutableStateOf<String?>(null) }
+    var creatingList by remember { mutableStateOf(false) }
+    var listRoute by remember { mutableStateOf<String?>(null) }
+    if (creatingList) {
+        var name by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { creatingList = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    createList(name); creatingList = false
+                }, enabled = name.isNotBlank()) { Text("Create", color = RelayColors.Blue) }
+            },
+            dismissButton = { TextButton(onClick = { creatingList = false }) { Text("Cancel", color = RelayColors.TextSecondary) } },
+            title = { Text("New list", color = RelayColors.TextPrimary) },
+            text = {
+                BasicTextField(
+                    value = name,
+                    onValueChange = { name = it.take(30) },
+                    singleLine = true,
+                    textStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 15.sp),
+                    cursorBrush = SolidColor(RelayColors.Blue),
+                    decorationBox = { inner ->
+                        if (name.isEmpty()) Text("List name", color = RelayColors.TextMuted, fontSize = 15.sp)
+                        inner()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(RelayColors.CardHigh)
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                )
+            },
+            containerColor = RelayColors.Card
+        )
+    }
+    listRoute?.let { route ->
+        AlertDialog(
+            onDismissRequest = { listRoute = null },
+            confirmButton = { TextButton(onClick = { listRoute = null }) { Text("Done", color = RelayColors.Blue) } },
+            title = { Text("Lists", color = RelayColors.TextPrimary) },
+            text = {
+                Column {
+                    if (lists.isEmpty()) Text("No lists yet. Tap + above the chats to make one.", color = RelayColors.TextSecondary, fontSize = 14.sp)
+                    lists.forEach { (id, listName) ->
+                        val inList = id in listMembership[route].orEmpty()
+                        Row(
+                            Modifier.fillMaxWidth().clickable { toggleListMembership(route, id) }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(listName, Modifier.weight(1f), color = RelayColors.TextPrimary, fontSize = 15.sp)
+                            Text(if (inList) "✓" else "", color = RelayColors.Blue, fontSize = 16.sp)
+                        }
+                    }
+                }
+            },
+            containerColor = RelayColors.Card
+        )
+    }
     confirmRoute?.let { route ->
         val name = items.firstOrNull { it.info.route == route }?.info?.title ?: "this chat"
         ConfirmDeleteDialog(
@@ -295,7 +207,29 @@ internal fun RelayChatsScreen(
         LazyColumn(Modifier.fillMaxSize().testTag("relay-chat-list"), contentPadding = PaddingValues(bottom = 88.dp)) {
             item { RelayHeader("Relay", myName, onAvatar) }
             item { RelaySearchField(search, { search = it }, "Find your friends") }
-            item { FilterChipsRow(filter, { filter = it }) }
+            item { FilterChipsRow(filter, { filter = it }, lists, { creatingList = true }, deleteList) }
+            if (requestsCount > 0) {
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(RelayColors.Card)
+                            .clickable { openRequests() }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RIcon(R.drawable.relay_chat, null, tint = RelayColors.Blue, size = 20.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Chat requests", color = RelayColors.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            Text(if (requestsCount == 1) "1 person wants to message you" else "$requestsCount people want to message you",
+                                color = RelayColors.TextSecondary, fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
             if (visible.isEmpty()) {
                 item {
                     Box(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
@@ -303,11 +237,18 @@ internal fun RelayChatsScreen(
                             loading -> EmptyCard(R.drawable.relay_clock, "Loading your chats…", "Saved Internet chats are being opened securely.")
                             storageProblem && items.isEmpty() -> EmptyCard(R.drawable.relay_info, "Saved Internet chats are unavailable",
                                 "Your history wasn't deleted. Nearby chats still work.")
+                            filter == "Internet" && query.isEmpty() -> EmptyCard(R.drawable.relay_broadcast, "No internet chats",
+                                "Add a friend with their Internet ID to chat from anywhere.") {
+                                TextButton(onClick = newInternetChat) { Text("Start an internet chat", color = RelayColors.Blue) }
+                            }
                             query.isNotEmpty() || filter != "All" -> EmptyCard(R.drawable.relay_search, "No chats found",
                                 "Try another name or filter.")
                             else -> EmptyCard(R.drawable.relay_chat, "No chats yet",
-                                "Find people around you in Discover, or tap + to message a friend online.") {
-                                TextButton(onClick = discover) { Text("Find people nearby", color = RelayColors.Blue) }
+                                "Find people around you in Discover, or start an internet chat with a friend's Internet ID.") {
+                                Row {
+                                    TextButton(onClick = discover) { Text("Find people nearby", color = RelayColors.Blue) }
+                                    TextButton(onClick = newInternetChat) { Text("Start an internet chat", color = RelayColors.Blue) }
+                                }
                             }
                         }
                     }
@@ -317,13 +258,16 @@ internal fun RelayChatsScreen(
                 val route = item.info.route
                 val isPinned = route in pinned
                 Box {
-                    ChatListRow(item, now, isPinned, route in favorites,
-                        toggleFavorite = { toggleFavorite(route) },
+                    ChatListRow(item, now, isPinned,
                         onClick = { openChat(route) }, onLongClick = { menuRoute = route })
                     DropdownMenu(expanded = menuRoute == route, onDismissRequest = { menuRoute = null }) {
                         DropdownMenuItem(
                             text = { Text(if (isPinned) "Unpin chat" else "Pin chat") },
                             onClick = { menuRoute = null; togglePin(route) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Lists") },
+                            onClick = { menuRoute = null; listRoute = route }
                         )
                         DropdownMenuItem(
                             text = { Text("Delete chat", color = RelayColors.Red) },
@@ -351,22 +295,22 @@ internal fun RelaySearchField(value: String, onChange: (String) -> Unit, placeho
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp)
-            .height(48.dp)
-            .clip(RoundedCornerShape(24.dp))
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .height(44.dp)
+            .clip(RoundedCornerShape(22.dp))
             .background(RelayColors.Card)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        RIcon(R.drawable.relay_search, null, tint = RelayColors.TextSecondary, size = 20.dp)
-        Spacer(Modifier.width(12.dp))
+        RIcon(R.drawable.relay_search, null, tint = RelayColors.TextSecondary, size = 18.dp)
+        Spacer(Modifier.width(10.dp))
         Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-            if (value.isEmpty()) Text(placeholder, color = RelayColors.TextMuted, fontSize = 15.sp)
+            if (value.isEmpty()) Text(placeholder, color = RelayColors.TextMuted, fontSize = 14.sp)
             BasicTextField(
                 value = value,
                 onValueChange = onChange,
                 singleLine = true,
-                textStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 15.sp),
+                textStyle = TextStyle(color = RelayColors.TextPrimary, fontSize = 14.sp),
                 cursorBrush = SolidColor(RelayColors.Blue),
                 modifier = Modifier.fillMaxWidth()
             )
@@ -375,53 +319,80 @@ internal fun RelaySearchField(value: String, onChange: (String) -> Unit, placeho
 }
 
 @Composable
-private fun FilterChipsRow(selected: String, onSelect: (String) -> Unit) {
+private fun FilterChipsRow(
+    selected: String,
+    onSelect: (String) -> Unit,
+    lists: List<Pair<String, String>> = emptyList(),
+    onCreate: (Boolean) -> Unit = {},
+    deleteList: (String) -> Unit = {}
+) {
+    var confirmList by remember { mutableStateOf<Pair<String, String>?>(null) }
+    confirmList?.let { (id, listName) ->
+        ConfirmDeleteDialog(
+            title = "Delete list?",
+            text = "$listName will be removed. The chats in it stay.",
+            confirmLabel = "Delete list",
+            onConfirm = { confirmList = null; deleteList(id) },
+            onDismiss = { confirmList = null }
+        )
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        chatFilters.forEach { name ->
-            val isOn = name == selected
+        val chip: @Composable (String, String, (() -> Unit)?) -> Unit = { label, key, onLong ->
+            val isOn = key == selected
             Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(if (isOn) RelayColors.BlueSelected else Color.Transparent)
-                    .border(1.dp, if (isOn) RelayColors.Blue.copy(alpha = 0.5f) else RelayColors.Divider, RoundedCornerShape(16.dp))
-                    .clickable { onSelect(name) }
-                    .padding(horizontal = 14.dp, vertical = 7.dp)
+                    .clip(CircleShape)
+                    .background(if (isOn) RelayColors.BlueSelected else RelayColors.Card)
+                    .combinedClickable(onClick = { onSelect(key) }, onLongClick = onLong)
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
-                Text(name, color = if (isOn) Color.White else RelayColors.TextPrimary, fontSize = 13.sp)
+                Text(label, color = if (isOn) RelayColors.Blue else RelayColors.TextPrimary,
+                    fontSize = 14.sp, fontWeight = FontWeight.Normal)
             }
+        }
+        chatFilters.forEach { name -> chip(name, name, null) }
+        lists.forEach { (id, listName) -> chip(listName, "list:" + id) { confirmList = id to listName } }
+        Box(
+            modifier = Modifier
+                .clip(CircleShape)
+                .background(RelayColors.Card)
+                .clickable { onCreate(true) }
+                .padding(horizontal = 14.dp, vertical = 6.dp)
+        ) {
+            Text("+ New list", color = RelayColors.Blue, fontSize = 14.sp, fontWeight = FontWeight.Normal)
         }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite: Boolean,
-                        toggleFavorite: () -> Unit, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean,
+                        onClick: () -> Unit, onLongClick: () -> Unit) {
     val info = item.info
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        ConversationAvatar(info, 48)
-        Spacer(Modifier.width(14.dp))
+        ConversationAvatar(info, 42)
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = info.title,
                     modifier = Modifier.weight(1f),
                     color = RelayColors.TextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontSize = RelayType.RowTitle,
+                    fontWeight = FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -429,7 +400,9 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite
                     RIcon(R.drawable.relay_pin, "Pinned", tint = RelayColors.TextSecondary, size = 14.dp)
                     Spacer(Modifier.width(6.dp))
                 }
-                Text(item.lastAtMs?.let { listTime(it, now) } ?: "", color = RelayColors.TextSecondary, fontSize = 12.sp)
+                // Unread chats get the accent-coloured time, like the reference client.
+                Text(item.lastAtMs?.let { listTime(it, now) } ?: "",
+                    color = if (item.unread > 0) RelayColors.Blue else RelayColors.TextSecondary, fontSize = RelayType.Meta)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -437,41 +410,24 @@ private fun ChatListRow(item: ChatListItem, now: Long, pinned: Boolean, favorite
                 }
                 if (item.unread > 0) UnreadBadge(item.unread)
             }
-            Text(
-                text = item.preview,
-                color = RelayColors.TextSecondary,
-                fontSize = 14.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        IconToggleButton(
-            checked = favorite,
-            onCheckedChange = { toggleFavorite() },
-            modifier = Modifier.size(48.dp)
-        ) {
-            RIcon(
-                if (favorite) R.drawable.relay_star_filled else R.drawable.relay_star,
-                if (favorite) "Remove ${info.title} from favorites" else "Add ${info.title} to favorites",
-                tint = if (favorite) RelayColors.Orange else RelayColors.TextSecondary,
-                size = 22.dp
-            )
         }
     }
 }
 
-/** The small icon + text line under the name ("BLE • Direct connection", "Waiting for relay sync"…). */
+/** The single line under the name: status icon + status text, then the message preview. */
 @Composable
-private fun ConnectionLine(item: ChatListItem) {
+private fun RowScope.ConnectionLine(item: ChatListItem) {
     val info = item.info
     when {
         item.failed -> {
             RIcon(R.drawable.relay_info, null, tint = RelayColors.Red, size = 15.dp)
-            Text("Message not sent", color = RelayColors.Red, fontSize = 12.sp, maxLines = 1)
+            Text("Message not sent", color = RelayColors.Red, fontSize = 12.sp, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
         item.waiting -> {
             RIcon(R.drawable.relay_clock, null, tint = RelayColors.Orange, size = 15.dp)
-            Text(if (info.nearby) "Waiting to send" else "Waiting for relay sync", color = RelayColors.Orange, fontSize = 12.sp, maxLines = 1)
+            Text(if (info.nearby) "Waiting to send" else "Waiting for relay sync", color = RelayColors.Orange, fontSize = 12.sp, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
         else -> {
             val icon = when {
@@ -486,7 +442,17 @@ private fun ConnectionLine(item: ChatListItem) {
                 else -> RelayColors.Nostr
             }
             RIcon(icon, null, tint = tint, size = 15.dp)
-            Text(info.linkText, color = RelayColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(info.linkText, color = RelayColors.TextMuted, fontSize = 12.sp, maxLines = 1)
+            if (item.preview.isNotBlank()) {
+                Text(
+                    "·  " + item.preview,
+                    color = RelayColors.TextSecondary,
+                    fontSize = RelayType.Secondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
         }
     }
 }
@@ -495,12 +461,13 @@ private fun ConnectionLine(item: ChatListItem) {
 private fun UnreadBadge(count: Int) {
     Box(
         modifier = Modifier
-            .size(20.dp)
+            .defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
             .clip(CircleShape)
-            .background(RelayColors.Blue),
+            .background(RelayColors.Blue)
+            .padding(horizontal = 5.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(if (count > 9) "9+" else count.toString(), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Text(if (count > 99) "99+" else count.toString(), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

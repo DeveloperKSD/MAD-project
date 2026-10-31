@@ -20,7 +20,8 @@ import java.io.File
 import java.util.UUID
 
 internal data class AttachmentUiState(val peer: String? = null, val draft: PickedAttachment? = null,
-    val busy: Boolean = false, val message: String? = null, val previews: Map<UUID, VerifiedAttachment> = emptyMap(), val labels: Map<UUID, String> = emptyMap())
+    val busy: Boolean = false, val message: String? = null, val previews: Map<UUID, VerifiedAttachment> = emptyMap(), val labels: Map<UUID, String> = emptyMap(),
+    val viewerIndex: Int = -1, val detailId: String? = null)
 internal data class VerifiedAttachment(val file: File, val kind: AttachmentKind, val bitmap: Bitmap?)
 
 /** Activity-scoped ViewModel: picker imports/confirmation survive activity recreation, never auto-send. */
@@ -47,6 +48,10 @@ internal class NearbyAttachmentModel(application: Application) : AndroidViewMode
             finally { mutable.value = mutable.value.copy(busy = false) }
         }
     }
+    fun openViewer(index: Int) { mutable.value = mutable.value.copy(viewerIndex = index) }
+    fun closeViewer() { mutable.value = mutable.value.copy(viewerIndex = -1) }
+    fun openDetail(id: String) { mutable.value = mutable.value.copy(detailId = id) }
+    fun closeDetail() { mutable.value = mutable.value.copy(detailId = null) }
     private var selectionPeer: String? = null
     private var selectionMultiHop = false
     fun requestSelection(peer: String, multiHop: Boolean) { selectionPeer = peer; selectionMultiHop = multiHop }
@@ -106,8 +111,28 @@ internal class NearbyAttachmentModel(application: Application) : AndroidViewMode
             BleFileAction.DISCARD -> "Attachment removed from this device."
         })
     }
+    /** Quiet gallery thumbnail loading: no busy flag, errors are silent (detail preview still reports them). */
+    fun quietPreview(status: BleFileStatus) {
+        if (mutable.value.busy || mutable.value.previews.containsKey(status.id)) return
+        if (status.phase != BleFilePhase.COMPLETED) return
+        viewModelScope.launch {
+            runCatching {
+                val verified = withContext(Dispatchers.IO) {
+                    AttachmentPolicy.checkSpace(privateFiles.directory.usableSpace, status.totalBytes)
+                    val file = privateFiles.temporary()
+                    try {
+                        file.outputStream().use { MeshRuntime.copyVerifiedAttachment(status.id, it).getOrThrow() }
+                        val kind = privateFiles.validate(file)
+                        VerifiedAttachment(file, kind, if (kind == AttachmentKind.PDF) null else privateFiles.preview(file))
+                    } catch (e: Exception) { file.delete(); throw e }
+                }
+                mutable.value.previews[status.id]?.file?.delete()
+                mutable.value = mutable.value.copy(previews = mutable.value.previews + (status.id to verified))
+            }
+        }
+    }
     fun preview(status: BleFileStatus) = operation {
-        require(!status.outgoing && status.phase == BleFilePhase.COMPLETED)
+        require(status.phase == BleFilePhase.COMPLETED)
         val verified = withContext(Dispatchers.IO) {
             AttachmentPolicy.checkSpace(privateFiles.directory.usableSpace, status.totalBytes)
             val file = privateFiles.temporary()

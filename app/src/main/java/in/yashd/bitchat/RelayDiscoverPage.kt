@@ -315,11 +315,11 @@ private fun PeerRow(peer: PeerState, onClick: () -> Unit) {
         PersonAvatar(name, 42.dp)
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(name, color = RelayColors.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+            Text(name, color = RelayColors.TextPrimary, fontSize = RelayType.RowTitle,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 RIcon(R.drawable.relay_bluetooth, null, tint = RelayColors.Bluetooth, size = 14.dp)
-                Text(stateText, color = RelayColors.TextSecondary, fontSize = 12.sp)
+                Text(stateText, color = RelayColors.TextSecondary, fontSize = RelayType.Meta)
             }
             distanceText(peer.rssi)?.let { Text(it, color = RelayColors.TextMuted, fontSize = 12.sp) }
         }
@@ -342,7 +342,7 @@ private fun ContactRow(item: ChatListItem, onClick: () -> Unit) {
         ConversationAvatar(info, 42)
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(info.title, color = RelayColors.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+            Text(info.title, color = RelayColors.TextPrimary, fontSize = RelayType.RowTitle,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 RIcon(
@@ -351,7 +351,7 @@ private fun ContactRow(item: ChatListItem, onClick: () -> Unit) {
                     tint = if (info.nearby) RelayColors.Bluetooth else RelayColors.Nostr,
                     size = 14.dp
                 )
-                Text(info.linkText, color = RelayColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(info.linkText, color = RelayColors.TextSecondary, fontSize = RelayType.Meta, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         StatusDot(if (info.online) RelayColors.Green else RelayColors.TextMuted, 9.dp)

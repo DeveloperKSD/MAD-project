@@ -7,17 +7,29 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModelProvider
 import `in`.yashd.bitchat.attachments.*
 import `in`.yashd.bitchat.mesh.*
@@ -25,12 +37,13 @@ import `in`.yashd.bitchat.transfer.TransferProfile
 import `in`.yashd.bitchat.transfer.ble.*
 import java.util.UUID
 
-private fun Context.activity(): ComponentActivity = when (this) {
+internal fun Context.activity(): ComponentActivity = when (this) {
     is ComponentActivity -> this
     is ContextWrapper -> baseContext.activity()
     else -> error("Attachment picker requires an activity")
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest: Int) {
     val context = LocalContext.current
@@ -41,6 +54,8 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
     var picker by rememberSaveable(peerId) { mutableStateOf(false) }
     var handledRequest by rememberSaveable(peerId) { mutableIntStateOf(0) }
     var destinationId by rememberSaveable { mutableStateOf<String?>(null) }
+    val detailId = ui.detailId
+    val viewerIndex = ui.viewerIndex
     val peer = mesh.peers.firstOrNull { it.identity.peerId == peerId }
     val connected = mesh.serviceRunning && peer?.state == PeerConnectionState.Authenticated && peer.identity.verified
     val multiHop = peer?.directDeviceAddress == null
@@ -63,89 +78,158 @@ internal fun NearbyAttachments(peerId: String, mesh: MeshUiState, pickerRequest:
         if (mesh.localPeerId.isNotEmpty()) MeshRuntime.reloadFileTransfers().onFailure { loadError = "Saved attachments are unavailable. Existing files were preserved." }
     }
     LaunchedEffect(pickerRequest) { if (pickerRequest > handledRequest) { handledRequest = pickerRequest; picker = true } }
-    if (picker) AlertDialog(onDismissRequest = { picker = false }, title = { Text("Nearby attachment") }, text = {
-        Column {
-            Text("JPEG/PNG images and PDF documents only. BLE is intended for small files. No file is sent until you confirm and your friend accepts.")
-            Text(if (connected) "${if (multiHop) "Multi-hop BLE · 250 KiB" else "Direct BLE · 1 MiB"} maximum" else "Turn on Nearby and reconnect to this friend before sending.")
+    LaunchedEffect(files.map { it.id to it.phase }) {
+        files.filter { galleryEligible(it) && ui.previews[it.id] == null }.forEach { model.quietPreview(it) }
+    }
+
+    // Picker: a sheet matching the New Chat sheet, not a dialog.
+    if (picker) ModalBottomSheet(onDismissRequest = { picker = false }, containerColor = RelayColors.Card) {
+        Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Share a file", color = RelayColors.TextPrimary, fontSize = RelayType.SubTitle, fontWeight = FontWeight.SemiBold)
+            Text("JPEG/PNG images and PDF documents only. Nothing is sent until you confirm and your friend accepts.",
+                color = RelayColors.TextSecondary, fontSize = RelayType.Label)
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(RelayColors.CardHigh)) {
+                RelayListRow(R.drawable.relay_image, "Photo", "JPEG or PNG · ${if (multiHop) "250 KiB" else "1 MiB"} maximum",
+                    iconTint = RelayColors.Blue) {
+                    if (connected && !ui.busy) { picker = false; model.requestSelection(peerId, multiHop); photo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                }
+                RowDivider()
+                RelayListRow(R.drawable.relay_storage, "File", "Image or PDF · ${if (multiHop) "Multi-hop BLE · 250 KiB" else "Direct BLE · 1 MiB"} maximum",
+                    iconTint = RelayColors.Blue) {
+                    if (connected && !ui.busy) { picker = false; model.requestSelection(peerId, multiHop); document.launch(arrayOf("image/jpeg", "image/png", "application/pdf")) }
+                }
+            }
+            if (!connected) Text("Turn on Nearby and reconnect to this friend before sending.", color = RelayColors.TextSecondary, fontSize = RelayType.Label)
         }
-    }, confirmButton = {
-        TextButton(enabled = connected && !ui.busy, onClick = { picker = false; model.requestSelection(peerId, multiHop); photo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) { Text("Choose photo") }
-    }, dismissButton = {
-        Row {
-            TextButton(enabled = connected && !ui.busy, onClick = { picker = false; model.requestSelection(peerId, multiHop); document.launch(arrayOf("image/jpeg", "image/png", "application/pdf")) }) { Text("Choose file") }
-            TextButton(onClick = { picker = false }) { Text("Close") }
-        }
-    })
+    }
+
     ui.draft?.takeIf { ui.peer == peerId }?.let { draft ->
         NearbyAttachmentConfirmation(draft, peer?.identity?.displayName?.takeIf { it.isNotBlank() } ?: peerId,
             peerId, ui.busy, connected, ui.message, model::send, model::dismiss)
     }
+
     if (ui.busy) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("Checking attachment…", color = RelayColors.TextSecondary) }
     (loadError ?: ui.message)?.let { Text(it, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = RelayColors.TextSecondary) }
-    if (files.isNotEmpty()) LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp).testTag("nearby-attachments"),
-        contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(files, key = { it.id.toString() }) { file ->
-            Column {
-                NearbyFileCard(file, connected, ui.busy, { model.action(file, it) }, { model.preview(file) }, ui.labels[file.id])
-                ui.previews[file.id]?.takeIf { file.phase == BleFilePhase.COMPLETED }?.let { verified ->
-                    verified.bitmap?.let { Image(it.asImageBitmap(), "Verified received image", Modifier.fillMaxWidth().heightIn(max = 200.dp)) }
-                    if (verified.kind == AttachmentKind.PDF) Text("PDF verified. Open saved PDFs only with a trusted viewer.")
-                    TextButton(enabled = !ui.busy, onClick = {
-                        destinationId = file.id.toString()
-                        val name = "attachment-${file.id.toString().take(8)}.${verified.kind.extension}"
-                        if (verified.kind == AttachmentKind.PDF) savePdf.launch(name) else if (verified.kind == AttachmentKind.PNG) savePng.launch(name) else saveJpeg.launch(name)
-                    }) { Text("Save verified file…") }
-                }
-            }
+
+    // Full-screen viewer with left/right swipe across verified received images.
+    if (viewerIndex >= 0) {
+        val viewable = files.filter { galleryEligible(it) }
+        if (viewable.isEmpty()) model.closeViewer()
+        else AttachmentPagerViewer(viewable, ui.previews, viewerIndex, model::quietPreview) { model.closeViewer() }
+    }
+
+    detailId?.let { id ->
+        val file = files.firstOrNull { it.id.toString() == id }
+        if (file == null) model.closeDetail() else ModalBottomSheet(onDismissRequest = { model.closeDetail() }, containerColor = RelayColors.Card) {
+            TransferDetail(file, connected, ui.busy, ui.labels[file.id], ui.previews[file.id], ui.message,
+                onAction = { model.action(file, it) }, onPreview = { model.preview(file) },
+                onView = { model.openViewer(files.filter { galleryEligible(it) }.indexOfFirst { it.id == file.id }) },
+                onSave = { verified ->
+                    destinationId = file.id.toString()
+                    val name = "attachment-${file.id.toString().take(8)}.${verified.kind.extension}"
+                    when (verified.kind) {
+                        AttachmentKind.PDF -> savePdf.launch(name)
+                        AttachmentKind.PNG -> savePng.launch(name)
+                        AttachmentKind.JPEG -> saveJpeg.launch(name)
+                    }
+                })
         }
     }
 }
 
+/** Compact transcript row: kind icon, honest name, state and live progress. Controls live only in the detail sheet. */
 @Composable
-internal fun NearbyFileCard(file: BleFileStatus, connected: Boolean, busy: Boolean,
-    action: (BleFileAction) -> Unit, preview: () -> Unit, filename: String? = null) {
-    val terminal = file.phase in setOf(BleFilePhase.COMPLETED, BleFilePhase.FAILED, BleFilePhase.CANCELLED, BleFilePhase.REJECTED)
-    val label = when (file.phase) {
-        BleFilePhase.OFFERED -> "Pending · waiting for acceptance"
-        BleFilePhase.AWAITING_ACCEPTANCE -> "Incoming authenticated file offer"
-        BleFilePhase.SENDING, BleFilePhase.RECEIVING -> "Transferring"
-        BleFilePhase.PAUSED -> "Paused"
-        BleFilePhase.COMPLETED -> "Completed · SHA-256 verified"
-        BleFilePhase.FAILED -> "Failed · file unavailable"
-        BleFilePhase.CANCELLED -> "Cancelled"
-        BleFilePhase.REJECTED -> "Rejected by recipient"
-    }
-    Card(Modifier.fillMaxWidth().testTag("attachment-${file.id}")) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(if (file.outgoing) "Outgoing attachment" else "Incoming attachment")
-            Text(filename ?: "Attachment ${file.id.toString().take(8)}")
-            Text(label)
-            Text("${file.totalBytes} bytes · ${if (file.profile == TransferProfile.MULTI_HOP_BLE) "Multi-hop BLE" else "Direct BLE"}")
-            if (file.phase in setOf(BleFilePhase.SENDING, BleFilePhase.RECEIVING)) {
-                LinearProgressIndicator(progress = { if (file.totalBytes == 0L) 0f else (file.confirmedBytes.toFloat() / file.totalBytes).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-                Text("${file.confirmedBytes} / ${file.totalBytes} bytes ${if (file.outgoing) "acknowledged by receiver" else "stored"}")
-                if (file.outgoing && file.confirmedBytes == file.totalBytes) Text("Awaiting receiver's verified completion.")
+internal fun TransferSummaryRow(file: BleFileStatus, kind: AttachmentKind?, filename: String?, onOpen: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(RelayColors.Card)
+            .clickable(onClick = onOpen)
+            .padding(12.dp)
+            .testTag("attachment-${file.id}"),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            RIcon(
+                if (kind == AttachmentKind.JPEG || kind == AttachmentKind.PNG) R.drawable.relay_image else R.drawable.relay_storage,
+                null, tint = RelayColors.TextSecondary, size = 22.dp)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(transferDisplayName(file.outgoing, filename, kind), color = RelayColors.TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                DotLabel(transferStateLabel(file.phase), transferStateColor(file.phase))
             }
-            if (!connected && !terminal) Text("Nearby is off or this friend is disconnected. Reconnect to continue.")
-            if (file.phase == BleFilePhase.AWAITING_ACCEPTANCE) {
-                Text("Filename and type are not sent by this protocol. Content is checked after verified reception. Accept only from someone you trust; offers expire after 30 seconds.")
-                Row {
-                    TextButton(enabled = connected && !busy, onClick = { action(BleFileAction.ACCEPT) }) { Text("Accept") }
-                    TextButton(enabled = !busy, onClick = { action(BleFileAction.REJECT) }) { Text("Reject") }
-                }
-            } else if (!terminal) {
-                Row {
-                    if (file.phase in setOf(BleFilePhase.SENDING, BleFilePhase.RECEIVING)) TextButton(enabled = !busy, onClick = { action(BleFileAction.PAUSE) }) { Text("Pause") }
-                    if (file.phase == BleFilePhase.PAUSED && file.outgoing) TextButton(enabled = connected && !busy, onClick = { action(BleFileAction.RESUME) }) { Text("Offer resume") }
-                    TextButton(enabled = !busy, onClick = { action(BleFileAction.CANCEL) }) { Text("Cancel transfer") }
-                }
-                if (file.phase == BleFilePhase.PAUSED && file.outgoing && file.confirmedBytes == 0L) Text("An expired offer may require Cancel transfer, then choosing the file again for a new offer.")
-                if (file.phase == BleFilePhase.PAUSED && !file.outgoing) Text("Ask the sender to offer resume, then accept again. Receiver-initiated resume is unavailable.")
-            }
-            if (file.phase == BleFilePhase.COMPLETED && !file.outgoing) TextButton(enabled = !busy, onClick = preview) { Text("Check / preview received file") }
-            if (file.phase in setOf(BleFilePhase.FAILED, BleFilePhase.CANCELLED, BleFilePhase.REJECTED)) Text("Automatic retry is unavailable. Remove this record, choose the file again and confirm a new offer.")
-            if (terminal) TextButton(enabled = !busy, onClick = { action(BleFileAction.DISCARD) }) { Text("Remove attachment") }
+            RIcon(R.drawable.relay_chevron, "Transfer details", tint = RelayColors.TextMuted, size = 18.dp)
         }
+        if (file.phase == BleFilePhase.SENDING || file.phase == BleFilePhase.RECEIVING) {
+            val progress = transferProgress(file.confirmedBytes, file.totalBytes)
+            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            Text("${(progress * 100).toInt()}% of ${file.totalBytes} bytes", color = RelayColors.TextSecondary, fontSize = RelayType.Meta)
+        }
+    }
+}
+
+internal fun transferStateColor(phase: BleFilePhase) = when (phase) {
+    BleFilePhase.COMPLETED -> RelayColors.Green
+    BleFilePhase.FAILED, BleFilePhase.REJECTED -> RelayColors.Red
+    BleFilePhase.CANCELLED, BleFilePhase.PAUSED -> RelayColors.TextMuted
+    else -> RelayColors.Blue
+}
+
+/** Full negotiation/status surface for one transfer. */
+@Composable
+internal fun TransferDetail(file: BleFileStatus, connected: Boolean, busy: Boolean, filename: String?,
+    verified: VerifiedAttachment?, message: String?, onAction: (BleFileAction) -> Unit,
+    onPreview: () -> Unit, onSave: (VerifiedAttachment) -> Unit, onView: () -> Unit = {}) {
+    val kind = verified?.kind
+    Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(transferDisplayName(file.outgoing, filename, kind), color = RelayColors.TextPrimary, fontSize = RelayType.SubTitle, fontWeight = FontWeight.SemiBold)
+        Text(
+            "${if (file.outgoing) "Outgoing" else "Incoming"} · ${if (file.profile == TransferProfile.MULTI_HOP_BLE) "Multi-hop BLE" else "Direct BLE"} · ${file.totalBytes} bytes",
+            color = RelayColors.TextSecondary, fontSize = RelayType.Label)
+        DotLabel(transferStateLabel(file.phase), transferStateColor(file.phase))
+        if (file.phase == BleFilePhase.SENDING || file.phase == BleFilePhase.RECEIVING) {
+            val progress = transferProgress(file.confirmedBytes, file.totalBytes)
+            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            Text("${file.confirmedBytes} / ${file.totalBytes} bytes ${if (file.outgoing) "acknowledged by receiver" else "stored"}",
+                color = RelayColors.TextSecondary, fontSize = RelayType.Meta)
+            if (file.outgoing && file.confirmedBytes == file.totalBytes) Text("Awaiting receiver's verified completion.", color = RelayColors.TextSecondary, fontSize = RelayType.Meta)
+        }
+        if (!connected && !isTerminalPhase(file.phase)) Text("Nearby is off or this friend is disconnected. Reconnect to continue.", color = RelayColors.TextSecondary, fontSize = RelayType.Label)
+        when (file.phase) {
+            BleFilePhase.AWAITING_ACCEPTANCE -> Text("Filename and type are not sent by this protocol. Content is checked after verified reception. Accept only from someone you trust; offers expire after 30 seconds.",
+                color = RelayColors.TextSecondary, fontSize = RelayType.Label)
+            BleFilePhase.PAUSED -> Text(
+                if (file.outgoing && file.confirmedBytes == 0L) "An expired offer may require Cancel transfer, then choosing the file again for a new offer."
+                else if (file.outgoing) "Offer resume to continue; the recipient must accept again."
+                else "Ask the sender to offer resume, then accept again. Receiver-initiated resume is unavailable.",
+                color = RelayColors.TextSecondary, fontSize = RelayType.Label)
+            BleFilePhase.FAILED, BleFilePhase.CANCELLED, BleFilePhase.REJECTED ->
+                Text("Automatic retry is unavailable. Remove this record, choose the file again and confirm a new offer.", color = RelayColors.TextSecondary, fontSize = RelayType.Label)
+            else -> {}
+        }
+        if (file.phase == BleFilePhase.AWAITING_ACCEPTANCE) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(enabled = connected && !busy, onClick = { onAction(BleFileAction.ACCEPT) }) { Text("Accept") }
+                TextButton(enabled = !busy, onClick = { onAction(BleFileAction.REJECT) }) { Text("Reject") }
+            }
+        } else if (!isTerminalPhase(file.phase)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (file.phase == BleFilePhase.SENDING || file.phase == BleFilePhase.RECEIVING) TextButton(enabled = !busy, onClick = { onAction(BleFileAction.PAUSE) }) { Text("Pause") }
+                if (file.phase == BleFilePhase.PAUSED && file.outgoing) TextButton(enabled = connected && !busy, onClick = { onAction(BleFileAction.RESUME) }) { Text("Offer resume") }
+                TextButton(enabled = !busy, onClick = { onAction(BleFileAction.CANCEL) }) { Text("Cancel transfer") }
+            }
+        }
+        if (file.phase == BleFilePhase.COMPLETED) {
+            if (verified == null) TextButton(enabled = !busy, onClick = onPreview) { Text(if (file.outgoing) "View verified sent file" else "Check / preview received file") }
+            verified?.let {
+                it.bitmap?.let { bmp -> Image(bmp.asImageBitmap(), "Verified received image", Modifier.fillMaxWidth().heightIn(max = 200.dp).clip(RoundedCornerShape(10.dp)).clickable(onClick = onView)) }
+                if (it.kind == AttachmentKind.PDF) Text("PDF verified. Open saved PDFs only with a trusted viewer.", color = RelayColors.TextSecondary, fontSize = RelayType.Label)
+                TextButton(enabled = !busy, onClick = { onSave(it) }) { Text("Save verified file…") }
+            }
+        }
+        if (isTerminalPhase(file.phase)) TextButton(enabled = !busy, onClick = { onAction(BleFileAction.DISCARD) }) { Text("Remove attachment") }
+        message?.let { Text(it, color = RelayColors.TextSecondary, fontSize = RelayType.Label) }
     }
 }
 
@@ -162,4 +246,76 @@ internal fun NearbyAttachmentConfirmation(draft: PickedAttachment, recipient: St
         }
     }, confirmButton = { TextButton(enabled = connected && !busy, onClick = send) { Text(if (busy) "Preparing…" else "Send offer") } },
         dismissButton = { TextButton(enabled = !busy, onClick = dismiss) { Text("Cancel selection") } })
+}
+
+/** Chat media bubble for a completed transfer: the photo fills a thin rounded frame at its own
+ * proportions, with the time (and outgoing delivery ticks) overlaid bottom-right on a scrim.
+ * PDFs show an honest file row. Tapping opens the swipe viewer. */
+@Composable
+internal fun MediaBubble(file: BleFileStatus, bitmap: android.graphics.Bitmap?, kind: AttachmentKind?, filename: String?,
+    mine: Boolean, onView: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(14.dp))
+                .background(if (mine) RelayColors.BlueBubble else RelayColors.Card)
+                .clickable(onClick = onView)
+        ) {
+            if (bitmap != null) {
+                Image(bitmap.asImageBitmap(), if (mine) "Sent image" else "Received image",
+                    Modifier.widthIn(max = 260.dp).aspectRatio(bitmap.width.toFloat() / bitmap.height.toFloat()).padding(3.dp).clip(RoundedCornerShape(11.dp)))
+                Row(
+                    Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = 8.dp)
+                        .clip(RoundedCornerShape(8.dp)).background(Color(0x99000000)).padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (file.createdAtMs > 0) Text(clockTime(file.createdAtMs), color = Color.White, fontSize = RelayType.Meta)
+                    if (mine) {
+                        Spacer(Modifier.width(3.dp))
+                        RIcon(R.drawable.relay_check_double, "Verified delivered", tint = Color.White, size = 13.dp)
+                    }
+                }
+            } else {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    RIcon(
+                        if (kind == AttachmentKind.JPEG || kind == AttachmentKind.PNG) R.drawable.relay_image else R.drawable.relay_storage,
+                        null, tint = RelayColors.TextSecondary, size = 22.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(transferDisplayName(file.outgoing, filename, kind), color = RelayColors.TextPrimary, fontSize = 15.sp)
+                        Text(if (file.createdAtMs > 0) "Verified · ${clockTime(file.createdAtMs)}" else "Verified",
+                            color = RelayColors.TextSecondary, fontSize = RelayType.Meta)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Full-screen swipeable viewer for verified received attachments (images render, PDFs note honestly). */
+@Composable
+internal fun AttachmentPagerViewer(viewable: List<BleFileStatus>, previews: Map<UUID, VerifiedAttachment>,
+    startIndex: Int, onLoadPreview: (BleFileStatus) -> Unit, onDismiss: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val pager = rememberPagerState(initialPage = startIndex.coerceIn(0, viewable.lastIndex)) { viewable.size }
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { page ->
+                val file = viewable[page]
+                val verified = previews[file.id]
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    when {
+                        verified?.bitmap != null -> Image(verified.bitmap.asImageBitmap(), "Verified received image",
+                            Modifier.fillMaxSize().clickable(onClick = onDismiss))
+                        verified?.kind == AttachmentKind.PDF -> Text("PDF document. Open the saved file with a trusted viewer.", color = Color.White)
+                        else -> {
+                            LaunchedEffect(file.id) { onLoadPreview(file) }
+                            CircularProgressIndicator()
+                        }
+                    }
+                }
+            }
+            Text("${pager.currentPage + 1} / ${viewable.size}", color = Color.White, fontSize = RelayType.Meta,
+                modifier = Modifier.align(Alignment.TopCenter).padding(24.dp))
+        }
+    }
 }

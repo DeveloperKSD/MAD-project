@@ -9,6 +9,9 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -38,12 +42,21 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
+import android.content.Context
+import android.os.Process
+import android.os.SystemClock
+import java.io.File
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -84,13 +97,39 @@ private const val TEXTS_TOP = 540f          // top of the area holding each page
 private const val TITLE_CAP_TOP = 675.5f
 private const val SPLASH_MILLIS = 1600L
 
+private const val START_PREFS = "relay_start"
+private const val KEY_ONBOARDED = "onboarding_done"
+private const val KEY_USERNAME = "username"
+
 /**
- * Shows the splash, then the onboarding, then [content] (the app as it was before).
- * The onboarding appears each time the app starts, like the team's original intro.
+ * Shows the blue splash, then - only on the first run - a name step and the onboarding
+ * pages, then [content] (the app as it was before). Later launches go splash -> app.
+ * Installs that already had the app (upgrade, not a fresh install) keep their identity
+ * and never see the onboarding again.
  */
 @Composable
 fun RelayStartFlow(content: @Composable () -> Unit) {
-    // "splash" -> "onboarding" -> "app". Saved, so rotating the phone doesn't start over.
+    val context = LocalContext.current
+    val prefs = remember { context.applicationContext.getSharedPreferences(START_PREFS, Context.MODE_PRIVATE) }
+    val firstRun = remember {
+        val done = prefs.getBoolean(KEY_ONBOARDED, false)
+        // Established installs skip onboarding: either the app was upgraded, or a Nearby
+        // identity file from before this process exists. An install that never finished
+        // setup has neither and still gets the first-run flow.
+        val info = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
+        val upgrade = info != null && info.lastUpdateTime != info.firstInstallTime
+        val processStartWall = System.currentTimeMillis() - SystemClock.elapsedRealtime() + Process.getStartElapsedRealtime()
+        val identityFile = File(context.applicationInfo.dataDir, "shared_prefs/identity.xml")
+        // Durable evidence of real use is the identity file itself: it must exist (an install
+        // that never finished setup has none) and either predate this process or belong to an
+        // upgraded app (whose legacy identity may have been rewritten on this very launch).
+        val fileExists = runCatching { identityFile.exists() && identityFile.length() > 0 }.getOrDefault(false)
+        val predatesProcess = runCatching { identityFile.lastModified() < processStartWall }.getOrDefault(false)
+        val existing = OnboardingDecision.isExistingInstall(fileExists, predatesProcess, upgrade)
+        if (!done && existing) prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
+        !done && !existing
+    }
+    // "splash" -> ("onboarding" -> "username" on first run) -> "app".
     var step by rememberSaveable { mutableStateOf("splash") }
     Crossfade(targetState = step, animationSpec = tween(350), label = "relay-start") { current ->
         when (current) {
@@ -98,11 +137,85 @@ fun RelayStartFlow(content: @Composable () -> Unit) {
                 RelayDesignTheme { RelaySplashScreen() }
                 LaunchedEffect(Unit) {
                     delay(SPLASH_MILLIS)
-                    step = "onboarding"
+                    step = if (firstRun) "onboarding" else "app"
                 }
             }
-            "onboarding" -> RelayDesignTheme { RelayOnboarding(onFinish = { step = "app" }) }
+            "onboarding" -> RelayDesignTheme {
+                RelayOnboarding(onFinish = { step = "username" })
+            }
+            "username" -> RelayDesignTheme {
+                RelayUsernameScreen(onContinue = { name ->
+                    prefs.edit().putString(KEY_USERNAME, name).apply()
+                    prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
+                    `in`.yashd.bitchat.mesh.MeshRuntime.renameSelf(name)
+                    step = "app"
+                })
+            }
             else -> content()
+        }
+    }
+}
+
+/** First run only, after the intro pages: the name friends will see for this device.
+ * Same black background, typography and button style as the onboarding pages. */
+@Composable
+internal fun RelayUsernameScreen(onContinue: (String) -> Unit) {
+    var name by rememberSaveable { mutableStateOf("") }
+    Box(Modifier.fillMaxSize().background(OnboardingBackground).imePadding()) {
+        Column(
+            Modifier.align(Alignment.Center).padding(horizontal = 47.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            PersonAvatar(name.ifBlank { "?" }, 96.dp)
+            Spacer(Modifier.height(28.dp))
+            Text(
+                "What should friends call you?",
+                color = Color.White, fontSize = 31.sp, fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "This name is shown to people nearby.",
+                color = OnboardingGray, fontSize = 14.sp, textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(32.dp))
+            BasicTextField(
+                value = name,
+                onValueChange = { name = it.take(40) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (name.isNotBlank()) onContinue(name.trim()) }),
+                textStyle = TextStyle(color = Color.Black, fontSize = 16.sp, textAlign = TextAlign.Center),
+                cursorBrush = SolidColor(Color.Black),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.White),
+                decorationBox = { inner ->
+                    Box(
+                        Modifier.fillMaxSize().padding(horizontal = 24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (name.isEmpty()) {
+                            Text("Your name", color = DotGray, fontSize = 16.sp)
+                        }
+                        inner()
+                    }
+                }
+            )
+            Spacer(Modifier.height(16.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(if (name.isBlank()) Color.White.copy(alpha = 0.35f) else Color.White)
+                    .clickable(enabled = name.isNotBlank(), role = Role.Button) { onContinue(name.trim()) },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Continue", color = Color.Black, fontSize = 16.5.sp, fontWeight = FontWeight.Medium)
+            }
         }
     }
 }

@@ -10,9 +10,10 @@ import `in`.yashd.bitchat.identity.encode64
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
+/** Encrypted persistence around ChatLog; queue and dedup decisions live in ChatLog. */
 class MessageStore(context: Context, private val cipher: HistoryCipher = HistoryCipher("relay.nearby.messages.aes.v1")) {
     private val prefs = context.applicationContext.getSharedPreferences("messages", Context.MODE_PRIVATE)
-    private val messages = LinkedHashMap<String, ChatMessage>()
+    private val log = ChatLog()
     var storageError: Boolean = false
         private set
     private val _conversation = MutableStateFlow<List<ChatMessage>>(emptyList())
@@ -23,53 +24,45 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
     }
 
     fun createOutbound(localPeerId: String, recipientId: String?, body: String, isPrivate: Boolean): ChatMessage {
-        val now = System.currentTimeMillis()
-        val message = ChatMessage(
-            messageId = UUID.randomUUID().toString(),
-            packetIdHex = null,
-            senderId = localPeerId,
-            recipientId = recipientId,
-            body = body.trim(),
-            createdAtMs = now,
-            receivedAtMs = null,
-            isPrivate = isPrivate,
-            status = MessageStatus.Pending,
-            direction = MessageDirection.Outbound
-        )
-        put(message)
+        check(!storageError) { "Nearby history is unavailable; existing data preserved" }
+        val message = log.createOutbound(localPeerId, recipientId, body, isPrivate,
+            UUID.randomUUID().toString(), System.currentTimeMillis())
+        saveOrThrow()
+        publish()
         return message
     }
 
-    fun addInbound(packetIdHex: String, senderId: String, recipientId: String?, body: String, isPrivate: Boolean): Boolean {
-        if (messages.values.any { it.packetIdHex == packetIdHex }) return false
-        val now = System.currentTimeMillis()
-        put(
-            ChatMessage(
-                messageId = UUID.randomUUID().toString(),
-                packetIdHex = packetIdHex,
-                senderId = senderId,
-                recipientId = recipientId,
-                body = body,
-                createdAtMs = now,
-                receivedAtMs = now,
-                isPrivate = isPrivate,
-                status = MessageStatus.Delivered,
-                direction = MessageDirection.Inbound
-            )
-        )
-        return true
+    fun addInbound(packetIdHex: String, senderId: String, recipientId: String?, body: String, isPrivate: Boolean,
+                   senderMessageId: String? = null): Boolean {
+        check(!storageError) { "Nearby history is unavailable; existing data preserved" }
+        val added = log.addInbound(UUID.randomUUID().toString(), packetIdHex, senderId, recipientId, body,
+            isPrivate, senderMessageId, System.currentTimeMillis())
+        if (added) {
+            saveOrThrow()
+            publish()
+        }
+        return added
     }
 
+    /** Private-chat peers present in saved history (either direction). */
+    fun knownPeerIds(): Set<String> = log.knownPeerIds()
+
+    /** Outbound messages waiting for a route, oldest first. */
+    fun pendingOutbound(): List<ChatMessage> = log.pendingOutbound()
+
     fun updateStatus(messageId: String, packetIdHex: String?, status: MessageStatus) {
-        messages[messageId]?.let {
-            put(it.copy(packetIdHex = packetIdHex ?: it.packetIdHex, status = status))
+        check(!storageError) { "Nearby history is unavailable; existing data preserved" }
+        if (log.updateStatus(messageId, packetIdHex, status) != null) {
+            saveOrThrow()
+            publish()
         }
     }
 
-    fun markPacketDelivered(packetIdHex: String, senderId: String) {
-        messages.values.firstOrNull { it.packetIdHex == packetIdHex && it.direction == MessageDirection.Outbound &&
-            (it.recipientId == senderId || it.recipientId == null) }?.let {
-            updateStatus(it.messageId, packetIdHex, MessageStatus.Delivered)
+    fun markPacketDelivered(packetIdHex: String, senderId: String, hops: Int? = null) {
+        check(!storageError) { "Nearby history is unavailable; existing data preserved" }
+        if (log.markPacketDelivered(packetIdHex, senderId, hops) != null) {
+            saveOrThrow()
+            publish()
         }
     }
 
@@ -84,28 +77,23 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
 
     private fun remove(matches: (ChatMessage) -> Boolean) {
         check(!storageError) { "Nearby history is unavailable; existing data preserved" }
-        if (!messages.values.removeAll(matches)) return
-        try { save() } catch (e: Exception) { storageError = true; throw e }
+        if (!log.removeMatches(matches)) return
+        saveOrThrow()
         publish()
     }
 
-    private fun put(message: ChatMessage) {
-        check(!storageError) { "Nearby history is unavailable; existing data preserved" }
-        messages[message.messageId] = message
-        while (messages.size > 200) messages.remove(messages.keys.first())
+    private fun saveOrThrow() {
         try { save() } catch (e: Exception) { storageError = true; throw e }
-        publish()
     }
 
     private fun publish() {
-        _conversation.value = messages.values.sortedBy { it.createdAtMs }.takeLast(100)
+        _conversation.value = log.all().sortedBy { it.createdAtMs }.takeLast(100)
     }
 
     private fun save() {
         val array = JSONArray()
-        messages.values.toList().takeLast(200).forEach { message ->
-            array.put(
-                JSONObject()
+        log.all().takeLast(200).forEach { message ->
+            val item = JSONObject()
                     .put("messageId", message.messageId)
                     .put("packetIdHex", message.packetIdHex)
                     .put("senderId", message.senderId)
@@ -116,7 +104,9 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
                     .put("isPrivate", message.isPrivate)
                     .put("status", message.status.name)
                     .put("direction", message.direction.name)
-            )
+            if (message.deliveredHops != null) item.put("deliveredHops", message.deliveredHops)
+            if (message.senderMessageId != null) item.put("senderMessageId", message.senderMessageId)
+            array.put(item)
         }
         if (!cipher.exists()) cipher.create()
         val encrypted = cipher.encrypt(array.toString(), "nearby-messages-v1").encode64()
@@ -129,10 +119,10 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
             val raw = if (encrypted != null) cipher.decrypt(encrypted.decode64(), "nearby-messages-v1")
                 else prefs.getString("items", null) ?: return
             val array = JSONArray(raw)
-            val loaded = LinkedHashMap<String, ChatMessage>()
+            val loaded = ArrayList<ChatMessage>(array.length())
             for (index in 0 until array.length()) {
                 val item = array.getJSONObject(index)
-                val message = ChatMessage(
+                loaded.add(ChatMessage(
                     messageId = item.getString("messageId"),
                     packetIdHex = item.optString("packetIdHex").takeIf { it.isNotBlank() && it != "null" },
                     senderId = item.getString("senderId"),
@@ -142,17 +132,17 @@ class MessageStore(context: Context, private val cipher: HistoryCipher = History
                     receivedAtMs = if (item.isNull("receivedAtMs")) null else item.getLong("receivedAtMs"),
                     isPrivate = item.getBoolean("isPrivate"),
                     status = MessageStatus.valueOf(item.getString("status")),
-                    direction = MessageDirection.valueOf(item.getString("direction"))
-                )
-                loaded[message.messageId] = message
+                    direction = MessageDirection.valueOf(item.getString("direction")),
+                    deliveredHops = if (item.has("deliveredHops")) item.getInt("deliveredHops") else null,
+                    senderMessageId = item.optString("senderMessageId").takeIf { it.isNotBlank() && it != "null" }
+                ))
             }
-            val interrupted = loaded.values.any { it.status == MessageStatus.Pending }
-            loaded.replaceAll { _, message -> if (message.status == MessageStatus.Pending) message.copy(status = MessageStatus.Failed) else message }
-            messages.putAll(loaded.entries.toList().takeLast(200).associate { it.toPair() })
-            if (encrypted == null || interrupted) save()
+            // Queued (Pending) messages intentionally survive restarts; the runtime flushes them.
+            log.replaceAll(loaded)
+            if (encrypted == null) save()
             publish()
         } catch (_: Exception) {
-            messages.clear()
+            log.clear()
             storageError = true
         }
     }

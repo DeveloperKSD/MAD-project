@@ -54,40 +54,52 @@ class BackgroundSyncTest {
     private fun rumor(outgoing: Boolean = false) = UnsignedNostrEvent(if (outgoing) owner else peer,
         1_000_000, 14, listOf(listOf("p", if (outgoing) peer else owner)), "private sample")
 
-    @Test fun explicitOptInRepeatedLaunchesDisableAndRestart() = runBlocking {
+    @Test fun savedConfigurationEnablesByDefaultAndKeepsScheduleAcrossLaunches() = runBlocking {
         val store = Store(); val scheduler = Scheduler()
-        fun controller() = BackgroundSyncController(store, scheduler, { saved })
-        val first = controller()
-        assertNull(first.reconcile())
-        assertFalse(first.setEnabled(true, false))
-        assertTrue(scheduler.active.isEmpty())
-        assertTrue(first.setEnabled(true, true))
-        val ticket = first.reconcile()!!
-        first.finished(ticket, 1000, true)
-        repeat(20) { assertNotNull(controller().reconcile()) }
+        // No explicit opt-in yet: a valid saved configuration enables background sync by default.
+        assertNotNull(BackgroundSyncController(store, scheduler, { saved }).reconcile())
+        assertTrue(store.value.enabled)
+        assertTrue(scheduler.active.isNotEmpty())
+        val decision = store.value
+        // Repeated launches keep the existing schedule and approval without re-writing.
+        repeat(20) { assertNotNull(BackgroundSyncController(store, scheduler, { saved }).reconcile()) }
+        assertEquals(decision, store.value)
         assertEquals(1, scheduler.active.size)
-        assertEquals(1000L, controller().reconcile()!!.decision.lastSuccessSeconds)
-        assertTrue(controller().setEnabled(false, false))
-        assertNull(controller().reconcile())
-        assertTrue(scheduler.active.isEmpty())
-        assertFalse(store.value.enabled)
+        assertEquals(1000L, BackgroundSyncController(store, scheduler, { saved }).also {
+            it.finished(BackgroundSyncTicket(decision, saved), 1000, true)
+        }.reconcile()!!.decision.lastSuccessSeconds)
+        // Without a saved configuration nothing is scheduled and nothing is stored.
+        val emptyStore = Store(); val emptyScheduler = Scheduler()
+        val empty = BackgroundSyncController(emptyStore, emptyScheduler, { null })
+        assertNull(empty.reconcile())
+        assertFalse(empty.setEnabled(true, true))
+        assertFalse(emptyStore.value.enabled)
+        assertTrue(emptyScheduler.active.isEmpty())
     }
-    @Test fun invalidOrChangedSavedConfigurationAndCorruptOptInFailClosed() = runBlocking {
+    @Test fun changedConfigurationRebindsAutomaticallyAndCorruptStoreFailsClosed() = runBlocking {
         val store = Store(); val scheduler = Scheduler()
         var available: SavedSyncConfiguration? = saved
         val controller = BackgroundSyncController(store, scheduler, { available })
-        assertTrue(controller.setEnabled(true, true))
+        assertNotNull(controller.reconcile())
+        assertTrue(store.value.enabled)
         val original = store.value
+        // A changed configuration re-binds automatically on the next reconcile.
         available = saved.copy(configuration = InternetConfiguration(saved.configuration.discovery, listOf("wss://changed.example")))
-        assertNull(controller.reconcile())
-        assertEquals(original, store.value)
-        assertTrue(scheduler.active.isEmpty())
+        assertNotNull(controller.reconcile())
+        assertNotEquals(original.binding, store.value.binding)
+        assertNotEquals(original.approval, store.value.approval)
+        assertTrue(store.value.enabled)
+        assertTrue(scheduler.active.isNotEmpty())
+        // A missing saved configuration pauses work but preserves the stored decision.
         available = null
+        assertNull(controller.reconcile())
+        assertTrue(scheduler.active.isEmpty())
+        assertTrue(store.value.enabled)
         assertFalse(controller.setEnabled(true, true))
+        // A corrupt store fails closed and preserves the damaged file.
         store.fail = true
         assertNull(controller.reconcile())
         assertTrue(controller.state.value.text.startsWith("Unavailable"))
-        assertEquals(original, store.value)
     }
     @Test fun staleCompletionCannotUndoDisableOrNewApproval() = runBlocking {
         val store = Store(); val scheduler = Scheduler()

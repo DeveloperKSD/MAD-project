@@ -41,11 +41,12 @@ class RelayConversationsTest {
         val nearby = mesh.copy(currentConversation = listOf(message("private", "me", id, true, MessageDirection.Outbound)))
         assertEquals(2, relayConversations(internet, nearby).map { it.id }.distinct().size)
     }
-    @Test fun unknownPrivateRecipientNeverCallsTransportWithPublicFallback() {
-        var calls = 0
-        assertFalse(sendNearbySafely("secret", "unknown", listOf(peer)) { _, _ -> calls++ })
-        assertFalse(sendNearbySafely("secret", "friend", emptyList()) { _, _ -> calls++ })
-        assertEquals(0, calls)
+    @Test fun unknownPrivateRecipientIsQueuedAndNeverFallsBackToPublic() {
+        val targets = mutableListOf<String?>()
+        assertTrue(sendNearbySafely("secret", "unknown", listOf(peer)) { _, target -> targets.add(target) })
+        assertTrue(sendNearbySafely("secret", "friend", emptyList()) { _, target -> targets.add(target) })
+        // Queued privately, never rewritten to the public group (null target).
+        assertEquals(listOf("unknown", "friend"), targets)
     }
     @Test fun knownPrivateRecipientAndExplicitPublicGroupKeepTheirTargets() {
         val targets = mutableListOf<String?>()

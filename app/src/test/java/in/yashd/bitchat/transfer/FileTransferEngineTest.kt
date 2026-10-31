@@ -310,5 +310,38 @@ class FileTransferEngineTest {
             assertEquals(2, engine.snapshots().size)
         }
     }
-
+    @Test fun completedOutgoingPayloadCanBeCopiedWithVerification() {
+        val data = bytes(5000)
+        FileTransferEngine(parent()).use { engine ->
+            val snap = engine.prepareOutgoing(ByteArrayInputStream(data), TransferProfile.DIRECT_BLE)
+            engine.start(snap.manifest.id)
+            for (i in 0 until snap.manifest.totalChunks) engine.acknowledge(snap.manifest.id, i)
+            engine.confirmRemoteCompletion(snap.manifest.id, snap.manifest.sha256)
+            val out = ByteArrayOutputStream()
+            engine.copyCompletedTo(snap.manifest.id, out)
+            assertArrayEquals(data, out.toByteArray())
+        }
+    }
+    @Test fun nonCompletedTransfersCannotBeCopied() {
+        FileTransferEngine(parent()).use { engine ->
+            val pending = engine.prepareOutgoing(ByteArrayInputStream(bytes(100)), TransferProfile.DIRECT_BLE)
+            try {
+                engine.copyCompletedTo(pending.manifest.id, ByteArrayOutputStream())
+                fail("pending transfer must not be copyable")
+            } catch (expected: IllegalStateException) { }
+            engine.start(pending.manifest.id)
+            try {
+                engine.copyCompletedTo(pending.manifest.id, ByteArrayOutputStream())
+                fail("in-flight transfer must not be copyable")
+            } catch (expected: IllegalStateException) { }
+        }
+    }
+    @Test fun tamperedOutgoingCompletionIsRejected() {
+        FileTransferEngine(parent()).use { engine ->
+            val snap = engine.prepareOutgoing(ByteArrayInputStream(bytes(100)), TransferProfile.DIRECT_BLE)
+            engine.start(snap.manifest.id)
+            for (i in 0 until snap.manifest.totalChunks) engine.acknowledge(snap.manifest.id, i)
+            assertThrows(TransferIntegrityException::class.java) { engine.confirmRemoteCompletion(snap.manifest.id, "0".repeat(64)) }
+        }
+    }
 }

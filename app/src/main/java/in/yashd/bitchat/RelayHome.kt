@@ -95,11 +95,25 @@ fun RelayHome(
     var setupOpen by rememberSaveable { mutableStateOf(false) }
     var nearbyDetails by rememberSaveable { mutableStateOf(false) }
     var newChat by remember { mutableStateOf(false) }
-    // Mutes persist independently; unread markers remain session-local.
+    var requestsOpen by rememberSaveable { mutableStateOf(false) }
+    val pendingRequests by MeshRuntime.pendingRequests.collectAsState()
+    // Mutes persist independently; unread markers persist encrypted across restarts.
     val muteContext = LocalContext.current
     val muteStore = remember { `in`.yashd.bitchat.ui.relay.MutedChatsStore(muteContext) }
     val savedMutes by muteStore.mutes.collectAsState()
-    val seenAt = remember { mutableStateMapOf<String, Long>() }
+    val seenStore = remember { `in`.yashd.bitchat.ui.relay.LastReadStore(muteContext) }
+    val savedSeen by seenStore.seen.collectAsState()
+    // Custom chat lists (Work, Family, ...) persist encrypted.
+    val listsStore = remember { `in`.yashd.bitchat.ui.relay.ChatListsStore(muteContext) }
+    val savedLists by listsStore.lists.collectAsState()
+    val savedListMembership by listsStore.membership.collectAsState()
+    // System connectivity (ConnectivityManager): validated internet, not just Wi-Fi association.
+    val connectivity = remember { `in`.yashd.bitchat.connectivity.ConnectivityObserver(muteContext) }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        connectivity.start()
+        onDispose { connectivity.stop() }
+    }
+    val online by connectivity.online.collectAsState()
     // Favourites and pins are stored independently and encrypted across restarts.
     val context = LocalContext.current
     val favoriteStore = remember { FavoriteChatsStore(context) }
@@ -127,7 +141,9 @@ fun RelayHome(
             model.loadConversation(routeTarget(chatRoute).orEmpty())
         }
     }
-    val items = buildChatList(internet, mesh, seenAt, sessionStart)
+    // Chats from people not yet accepted wait in Requests instead of the main list.
+    val items = buildChatList(internet, mesh, savedSeen, sessionStart)
+        .filter { !(it.info.nearby && it.info.target != null && it.info.target in pendingRequests) }
     fun favoriteKey(route: String): String? = runCatching {
         if (routeIsNearby(route)) FavoriteChatsStore.key("nearby", mesh.localPeerId, routeTarget(route))
         else FavoriteChatsStore.key("internet", internet.publicKey,
@@ -153,6 +169,7 @@ fun RelayHome(
         onlineEntry = false
         setupOpen = false
         nearbyDetails = false
+        requestsOpen = false
         tab = index
     }
     val openChat: (String) -> Unit = { route ->
@@ -169,10 +186,11 @@ fun RelayHome(
             // Persist cleanup even if the UI scope was cancelled by recreation during deletion.
             val removed = key == null || favoriteStore.remove(key)
             scope.launch {
+                listsStore.removeRoute(route)
                 pinStore.remove(route)
                 messagePinStore.removeChat(route)
                 // Keep mute preferences when deleting history.
-                seenAt.remove(route)
+                seenStore.remove(route)
                 if (chat == route) chat = null
                 if (contact == route) contact = null
                 toast(if (removed) "Chat deleted" else "Chat deleted, but saved favorites could not be updated. Existing favorites were preserved.")
@@ -182,14 +200,14 @@ fun RelayHome(
         if (routeIsNearby(route)) MeshRuntime.deleteConversation(target, deleted)
         else if (target != null) model.deleteConversation(target, deleted)
     }
-    val atRoot = chatRoute == null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails
-    val showingChat = chatRoute != null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails
+    val atRoot = chatRoute == null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails && !requestsOpen
+    val showingChat = chatRoute != null && contactRoute == null && !onlineEntry && !setupOpen && !nearbyDetails && !requestsOpen
 
     LaunchedEffect(notificationRoute) {
         notificationRoute?.let { route ->
             goTab(0)
             newChat = false
-            chat = route
+            if (route == "requests") requestsOpen = true else chat = route
             notificationConsumed()
         }
     }
@@ -200,6 +218,7 @@ fun RelayHome(
 
     BackHandler(enabled = !atRoot || tab != 0) {
         when {
+            requestsOpen -> requestsOpen = false
             setupOpen -> setupOpen = false
             onlineEntry -> onlineEntry = false
             nearbyDetails -> nearbyDetails = false
@@ -235,7 +254,15 @@ fun RelayHome(
                     }
             ) {
                 internet.error?.takeIf { !setupOpen }?.let { ErrorBanner(it, model::clearError) }
+                if (tab == 0 && atRoot && !online) OfflineNotice(mesh.serviceRunning)
                 when {
+                    requestsOpen -> RequestsPage(
+                        mesh = mesh,
+                        pending = pendingRequests,
+                        back = { requestsOpen = false },
+                        accept = { MeshRuntime.acceptRequest(it) },
+                        decline = { MeshRuntime.declineRequest(it) }
+                    )
                     setupOpen -> InternetSetupScreen(
                         internet, model::updateSetupServers, model::setupBack, model::setupNext,
                         model::announce, model::retrySetup,
@@ -250,7 +277,6 @@ fun RelayHome(
                             openChat(internetRoute(npub))
                         },
                         back = { onlineEntry = false },
-                        setup = { setupOpen = true },
                         canSave = !internet.storageLoading && internet.storageError == null
                     )
                     nearbyDetails -> NearbyDetailsPage(back = { nearbyDetails = false }, content = nearbySettings)
@@ -279,7 +305,7 @@ fun RelayHome(
                         sendInternet = model::send,
                         openSetup = { setupOpen = true },
                         openDiscover = { goTab(1) },
-                        markSeen = { seenAt[chatRoute] = System.currentTimeMillis() },
+                        markSeen = { seenStore.mark(chatRoute) },
                         toast = toast,
                         olderMessages = { model.loadConversation(chatRoute.substringAfter(':'), older = true) },
                         latestMessages = { model.loadConversation(chatRoute.substringAfter(':')) },
@@ -302,14 +328,26 @@ fun RelayHome(
                         openChat = openChat,
                         newChat = { newChat = true },
                         discover = { goTab(1) },
+                        newInternetChat = { onlineEntry = true },
                         pinned = pinned,
                         togglePin = togglePin,
                         deleteChat = deleteChat,
+                        requestsCount = pendingRequests.size,
+                        openRequests = { requestsOpen = true },
+                        lists = savedLists,
+                        listMembership = savedListMembership,
+                        createList = { if (!listsStore.create(it)) toast("List could not be saved. Existing data was preserved.") },
+                        toggleListMembership = { route, id -> if (!listsStore.toggle(route, id)) toast("Lists could not be saved. Existing data was preserved.") },
+                        deleteList = { if (!listsStore.deleteList(it)) toast("List could not be deleted. Existing data was preserved.") },
                         refreshing = refreshing,
                         onRefresh = {
                             scope.launch {
                                 refreshing = true
                                 refreshedAt = System.currentTimeMillis()
+                                // Real refresh: re-announce + flush queued Nearby messages,
+                                // reconnect or re-subscribe the Internet inbox.
+                                MeshRuntime.refreshNow()
+                                model.refresh()
                                 delay(1_000)
                                 refreshing = false
                             }
@@ -359,17 +397,40 @@ private fun RelayBottomBar(selected: Int, onSelect: (Int) -> Unit) {
                     selected = selected == index,
                     onClick = { onSelect(index) },
                     icon = { RIcon(icons[index], null, size = 24.dp) },
-                    label = { Text(label, fontSize = 12.sp) },
+                    label = { Text(label, fontSize = 12.sp, fontWeight = FontWeight.Normal) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = RelayColors.Blue,
-                        selectedTextColor = RelayColors.Blue,
-                        indicatorColor = Color.Transparent,
+                        selectedIconColor = RelayColors.Bluetooth,
+                        selectedTextColor = RelayColors.Bluetooth,
+                        indicatorColor = RelayColors.BlueSelected,
                         unselectedIconColor = RelayColors.TextSecondary,
                         unselectedTextColor = RelayColors.TextSecondary
                     )
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun OfflineNotice(nearbyOn: Boolean) {
+    // Offline only means Internet chats are unavailable; Nearby is only claimed when its
+    // Bluetooth service is actually running.
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(RelayColors.Card)
+            .padding(start = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            if (nearbyOn) "No internet connection. Internet chats are unavailable; Nearby over Bluetooth is on."
+            else "No internet connection. Internet chats are unavailable.",
+            Modifier.weight(1f).padding(vertical = 10.dp),
+            color = RelayColors.TextPrimary,
+            fontSize = 13.sp
+        )
     }
 }
 
@@ -397,8 +458,8 @@ private fun NewChatSheet(dismiss: () -> Unit, nearby: () -> Unit, online: () -> 
             modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("New Chat", color = RelayColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-            Text("How would you like to connect?", color = RelayColors.TextSecondary, fontSize = 14.sp)
+            Text("New Chat", color = RelayColors.TextPrimary, fontSize = RelayType.SubTitle, fontWeight = FontWeight.SemiBold)
+            Text("How would you like to connect?", color = RelayColors.TextSecondary, fontSize = RelayType.Label)
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -411,7 +472,7 @@ private fun NewChatSheet(dismiss: () -> Unit, nearby: () -> Unit, online: () -> 
                 )
                 RowDivider()
                 RelayListRow(
-                    R.drawable.relay_broadcast, "Chat Online", "Add a friend once with their public Relay ID",
+                    R.drawable.relay_broadcast, "New internet chat", "Add a friend once with their Internet ID",
                     iconTint = RelayColors.Nostr, onClick = online
                 )
             }

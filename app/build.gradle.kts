@@ -52,6 +52,8 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.11.2")
     androidTestImplementation("androidx.work:work-testing:2.11.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
     implementation("org.bouncycastle:bcprov-jdk18on:1.80.2")

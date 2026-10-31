@@ -44,7 +44,12 @@ data class ChatMessage(
     val receivedAtMs: Long?,
     val isPrivate: Boolean,
     val status: MessageStatus,
-    val direction: MessageDirection
+    val direction: MessageDirection,
+    /** Hops the delivery ACK travelled (0 = direct), null until delivered.
+     * Derived from the ACK's TTL, which a relay can alter: approximate, not authenticated. */
+    val deliveredHops: Int? = null,
+    /** Sender's own message id on inbound messages, used to deduplicate re-sent packets. */
+    val senderMessageId: String? = null
 )
 
 data class BluetoothReadiness(
@@ -72,6 +77,8 @@ data class MeshUiState(
     ),
     val serviceRunning: Boolean = false,
     val peers: List<PeerState> = emptyList(),
+    /** Last-known announced names for peers no longer in range; unverified labels, on-device only. */
+    val knownNames: Map<String, String> = emptyMap(),
     val currentConversation: List<ChatMessage> = emptyList(),
     val errors: List<String> = emptyList()
 )
@@ -87,7 +94,8 @@ enum class PacketType(val value: Int) {
     PING(0x30),
     PONG(0x31),
     FILE_CONTROL(0x40),
-    FILE_CHUNK(0x41);
+    FILE_CHUNK(0x41),
+    CONTROL(0x50);
 
     companion object {
         fun fromValue(value: Int): PacketType? = entries.firstOrNull { it.value == value }
