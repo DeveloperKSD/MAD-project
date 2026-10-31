@@ -1,5 +1,9 @@
 package `in`.yashd.bitchat.ui.relay
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -16,6 +20,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.journeyapps.barcodescanner.ScanContract
 import `in`.yashd.bitchat.RelayColors
 import `in`.yashd.bitchat.RelayType
 import kotlinx.coroutines.launch
@@ -30,22 +36,25 @@ fun OnlineChatScreen(add: suspend (String, String) -> String?, open: (String) ->
     // Sensitive contact metadata must not enter plaintext Android saved state.
     var name by remember { mutableStateOf("") }
     var problem by rememberSaveable { mutableStateOf<String?>(null) }
-    var scanning by rememberSaveable { mutableStateOf(false) }
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val scanned = result.contents
+        if (scanned != null) {
+            val parsed = parseScannedPublicId(scanned)
+            if (parsed == null) problem = "That QR code isn’t a Relay Internet ID. Ask your friend to show the QR from their Internet chat screen."
+            else { publicId = parsed; problem = null }
+        }
+    }
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) scanLauncher.launch(qrScanOptions())
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("New Internet chat", color = RelayColors.TextPrimary, fontSize = RelayType.SubTitle, fontWeight = FontWeight.SemiBold)
-
-        if (scanning) {
-            QrScannerScreen(onResult = { scanned ->
-                scanning = false
-                val parsed = parseScannedPublicId(scanned)
-                if (parsed == null) problem = "That QR code isn’t a Relay Internet ID. Ask your friend to show the QR from their Internet chat screen."
-                else { publicId = parsed; problem = null }
-            }, onClose = { scanning = false })
-            return@Column
-        }
         Text("Paste your friend’s Internet ID, or scan the QR code on their phone. They only need to share it once; this conversation saves it on this device.",
             color = RelayColors.TextSecondary, fontSize = RelayType.Label)
-        OutlinedButton(onClick = { scanning = true }, modifier = Modifier.fillMaxWidth()) { Text("Scan QR code") }
+        OutlinedButton(onClick = {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) scanLauncher.launch(qrScanOptions())
+            else cameraPermission.launch(Manifest.permission.CAMERA)
+        }, modifier = Modifier.fillMaxWidth()) { Text("Scan QR code") }
         OutlinedTextField(publicId, { publicId = it; problem = null }, Modifier.fillMaxWidth(), singleLine = true,
             label = { Text("Friend’s Internet ID (npub)") }, shape = RoundedCornerShape(18.dp), isError = problem != null)
         problem?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = RelayType.Meta) }
