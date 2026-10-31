@@ -53,7 +53,6 @@ import androidx.compose.ui.unit.sp
 import `in`.yashd.bitchat.mesh.MeshRuntime
 import `in`.yashd.bitchat.mesh.MeshUiState
 import `in`.yashd.bitchat.ui.relay.InternetSetupScreen
-import `in`.yashd.bitchat.ui.relay.inboxStatusSummary
 import `in`.yashd.bitchat.ui.relay.OnlineChatScreen
 import `in`.yashd.bitchat.ui.relay.FavoriteChatsStore
 import `in`.yashd.bitchat.ui.relay.PinnedChatsStore
@@ -272,15 +271,12 @@ fun RelayHome(
                     )
                     onlineEntry -> OnlineChatScreen(
                         model::addInternetConversation,
-                        npub = internet.npub,
-                        inboxSummary = inboxStatusSummary(internet.readyToShare, internet.setup.finished, internet.inboxes),
                         open = { npub ->
                             onlineEntry = false
                             tab = 0
                             openChat(internetRoute(npub))
                         },
                         back = { onlineEntry = false },
-                        setup = { setupOpen = true },
                         canSave = !internet.storageLoading && internet.storageError == null
                     )
                     nearbyDetails -> NearbyDetailsPage(back = { nearbyDetails = false }, content = nearbySettings)

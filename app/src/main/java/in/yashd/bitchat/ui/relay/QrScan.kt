@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloat
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -63,12 +64,41 @@ fun QrScannerScreen(onResult: (String) -> Unit, onClose: () -> Unit) {
 }
 
 @Composable
+private fun ScanOverlay(modifier: Modifier) {
+    val transition = androidx.compose.animation.core.rememberInfiniteTransition()
+    val fraction by transition.animateFloat(0f, 1f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(1600, easing = androidx.compose.animation.core.LinearEasing),
+            androidx.compose.animation.core.RepeatMode.Reverse))
+    androidx.compose.foundation.Canvas(modifier) {
+        val boxSize = size.minDimension * 0.62f
+        val left = (size.width - boxSize) / 2f
+        val top = (size.height - boxSize) / 2f
+        val stroke = 3.dp.toPx()
+        val corner = 22.dp.toPx()
+        val accent = RelayColors.Blue
+        // Dim outside the framing box.
+        drawRect(androidx.compose.ui.graphics.Color(0x990E0F11))
+        drawRoundRect(androidx.compose.ui.graphics.Color.Transparent, androidx.compose.ui.geometry.Offset(left, top),
+            androidx.compose.ui.geometry.Size(boxSize, boxSize), androidx.compose.ui.geometry.CornerRadius(corner, corner),
+            blendMode = androidx.compose.ui.graphics.BlendMode.Clear)
+        drawRoundRect(accent, androidx.compose.ui.geometry.Offset(left, top),
+            androidx.compose.ui.geometry.Size(boxSize, boxSize), androidx.compose.ui.geometry.CornerRadius(corner, corner),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(stroke))
+        val lineY = top + boxSize * fraction
+        drawRect(accent, androidx.compose.ui.geometry.Offset(left + stroke * 2, lineY),
+            androidx.compose.ui.geometry.Size(boxSize - stroke * 4, stroke), alpha = 0.8f)
+    }
+}
+
+@Composable
 private fun QrCameraView(modifier: Modifier, onResult: (String) -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) { onDispose { analyzerExecutor.shutdown() } }
-    AndroidView(modifier = modifier, factory = { ctx ->
+    androidx.compose.foundation.layout.Box(modifier) {
+    AndroidView(modifier = Modifier.matchParentSize(), factory = { ctx ->
         val view = PreviewView(ctx)
         val providerFuture = ProcessCameraProvider.getInstance(ctx)
         providerFuture.addListener({
@@ -93,4 +123,6 @@ private fun QrCameraView(modifier: Modifier, onResult: (String) -> Unit) {
         }, ContextCompat.getMainExecutor(ctx))
         view
     })
+    ScanOverlay(Modifier.matchParentSize())
+    }
 }
